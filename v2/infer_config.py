@@ -108,3 +108,4 @@ FORCE_CPU = False
 # Examples that would be excluded: img_001_c.png, img_001_sl.jpg, img_001_f.png
 # Set to an empty list [] to disable filtering and use all images.
 EXCLUDE_SUFFIXES = ["_c", "_sl", "_sw", "_f"]
+  
