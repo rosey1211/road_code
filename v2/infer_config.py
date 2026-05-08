@@ -14,7 +14,9 @@ CHECKPOINT = os.path.join(os.path.dirname(__file__), "road_best.pth")
 # Directory that contains both labels.csv and the image files.
 # This can be any train/ or test/ split, or an entirely different dataset.
 DATASET_DIR = os.path.join(os.path.dirname(__file__),
-                           "..", "data", "diu_gravel_road0_lr", "test")
+                           "..", "data", "narrow_trail_through_trees_lr", "test")
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "diu_gravel_road0_lr", "test")
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data", "diu_gravel_road3", "test")
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
@@ -93,6 +95,13 @@ FORK_HINT_PROXIMITY = 0.20
 # (|p_near.y - p_mid.y| + |p_mid.y - p_far.y|).
 # 0.5 = curve may swing at most half the vertical span sideways.
 CURVE_SWING_FACTOR = 0.5
+
+# Override the model's scan-line positions (row_fractions).
+# Set to a list of 3 ascending fractions, e.g. [0.35, 0.60, 0.80], to use
+# custom row heights instead of the values stored in the checkpoint.
+# Leave as None to use whatever the checkpoint recorded.
+#ROW_FRACTIONS = [0.48,0.58,0.65]
+ROW_FRACTIONS = None
 
 # Debug mode: overlay sigmoid response bars on each scan line (translucent green).
 # Shows raw model output for all buckets regardless of road_present state.

@@ -470,6 +470,9 @@ def main():
 
     model, _, epoch = RoadCNN.from_checkpoint(args.checkpoint, device=device)
     model.eval()
+    if cfg.ROW_FRACTIONS is not None:
+        model.row_fractions = cfg.ROW_FRACTIONS
+        model.row_indices = [int(f * model.image_height) for f in model.row_fractions]
     _cfg.BUCKET_EDGES = model.bucket_edges_all.tolist()
     print(f"Checkpoint : {args.checkpoint}  (epoch {epoch})")
     print(f"Device     : {device}")
