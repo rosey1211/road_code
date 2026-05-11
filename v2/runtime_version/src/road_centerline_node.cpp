@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -166,7 +167,8 @@ static void drawBranch(cv::Mat & canvas,
 class RoadCenterlineNode : public rclcpp::Node
 {
 public:
-    RoadCenterlineNode() : Node("road_centerline_node")
+    explicit RoadCenterlineNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
+        : Node("road_centerline_node", options)
     {
         declare_parameter("model_path",          "road_model.pt");
         declare_parameter("config_path",         "road_model_config.yaml");
@@ -458,10 +460,29 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr visual_pub_;
 };
 
+static const std::string DEFAULT_PARAMS_FILE =
+    "/home/rosey1211/code/road_code/v2/runtime_version/config/road_centerline_params.yaml";
+
 int main(int argc, char ** argv)
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<RoadCenterlineNode>());
+
+    // If the user didn't supply --params-file on the command line, load the
+    // default config so the node always has sensible values out of the box.
+    bool has_params_file = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--params-file") {
+            has_params_file = true;
+            break;
+        }
+    }
+
+    rclcpp::NodeOptions options;
+    if (!has_params_file && std::filesystem::exists(DEFAULT_PARAMS_FILE)) {
+        options.arguments({"--ros-args", "--params-file", DEFAULT_PARAMS_FILE});
+    }
+
+    rclcpp::spin(std::make_shared<RoadCenterlineNode>(options));
     rclcpp::shutdown();
     return 0;
 }
