@@ -13,10 +13,10 @@ CHECKPOINT = os.path.join(os.path.dirname(__file__), "road_best.pth")
 # ── Dataset ───────────────────────────────────────────────────────────────────
 # Directory that contains both labels.csv and the image files.
 # This can be any train/ or test/ split, or an entirely different dataset.
-DATASET_DIR = os.path.join(os.path.dirname(__file__),
-                           "..", "data", "narrow_trail_through_trees_lr", "test")
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
-#                           "..", "data", "diu_gravel_road0_lr", "test")
+#                           "..", "data", "narrow_trail_through_trees_lr", "test")
+DATASET_DIR = os.path.join(os.path.dirname(__file__),
+                           "..", "data", "diu_gravel_road0_lr", "test")
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data", "diu_gravel_road3", "test")
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
