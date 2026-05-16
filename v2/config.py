@@ -4,7 +4,7 @@
 
 # ── Dataset selection ─────────────────────────────────────────────────────────
 # Name of the dataset directory inside data/.
-DATASET_NAME = "diu_diverse_training_data"
+DATASET_NAME = "fhl_diverse_training_data"
 
 # ── Model input size (training resolution) ────────────────────────────────────
 # Any input image will be automatically resized to these dimensions inside the
@@ -79,7 +79,11 @@ TRAIN_LABELS_CSV = os.path.join(TRAIN_DIR, "labels.csv")
 TEST_LABELS_CSV  = os.path.join(TEST_DIR,  "labels.csv")
 TRAIN_DATASET_INFO = os.path.join(TRAIN_DIR, "dataset.info")
 TEST_DATASET_INFO  = os.path.join(TEST_DIR,  "dataset.info")
-CHECKPOINT      = os.path.join(os.path.dirname(__file__), "road_best.pth")
+# Name of the model checkpoint (no extension).
+# All inference scripts (live_infer.py, infer.py, test.py) use this as their
+# default checkpoint.  Change it here and every script picks up the new model.
+MODEL_NAME      = "fhl_road_best"
+CHECKPOINT      = os.path.join(os.path.dirname(__file__), MODEL_NAME + ".pth")
 
 # ── ImageNet normalisation constants ─────────────────────────────────────────
 NORM_MEAN = [0.485, 0.456, 0.406]

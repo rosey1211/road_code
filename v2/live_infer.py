@@ -71,10 +71,8 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
     ----------
     image_tensor : CHW float tensor (single image, already on CPU)
     outputs      : tuple (cls_logits, r0, r1, r2) — single-item batch tensors
-    gt_masks     : [N_ROWS, N_BUCKETS] float tensor
+    gt_masks     : [N_ROWS, N_BUCKETS] float tensor, or None when no labels file
     model        : RoadCNN instance (provides geometry params)
-    threshold    : minimum sigmoid prob to treat a bucket as active (unused in
-                   peak selection — the argmax is always drawn)
     """
     canvas = _denorm(image_tensor, model.norm_mean, model.norm_std).copy()
     h, w   = canvas.shape[:2]
@@ -123,19 +121,20 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
     road_present = road_prob > 0.5
     row_logits   = [r0_l, r1_l, r2_l]
 
-    # ── GT yellow translucent bars ────────────────────────────────────────────
-    bar_half_h = max(2, h // 14)
-    overlay    = canvas.copy()
-    for r, frac in enumerate(model.row_fractions):
-        bx0, bx1, _ = _row_edge_info(r)
-        row_y    = int(frac * h)
-        y0       = max(0, row_y - bar_half_h * 2)
-        y1       = row_y
-        gt_peaks = [b for b in range(n) if gt_masks[r, b].item() > 0.9]
-        for b in gt_peaks:
-            cv2.rectangle(overlay, (bx0[b], y0), (bx1[b], y1),
-                          _YELLOW, cv2.FILLED)
-    canvas = cv2.addWeighted(overlay, 0.7, canvas, 0.3, 0)
+    # ── GT yellow translucent bars (only when labels are available) ───────────
+    if gt_masks is not None:
+        bar_half_h = max(2, h // 14)
+        overlay    = canvas.copy()
+        for r, frac in enumerate(model.row_fractions):
+            bx0, bx1, _ = _row_edge_info(r)
+            row_y    = int(frac * h)
+            y0       = max(0, row_y - bar_half_h * 2)
+            y1       = row_y
+            gt_peaks = [b for b in range(n) if gt_masks[r, b].item() > 0.9]
+            for b in gt_peaks:
+                cv2.rectangle(overlay, (bx0[b], y0), (bx1[b], y1),
+                              _YELLOW, cv2.FILLED)
+        canvas = cv2.addWeighted(overlay, 0.7, canvas, 0.3, 0)
 
     # ── Row guide dashed lines + bucket hash marks ────────────────────────────
     for ri, frac in enumerate(model.row_fractions):
@@ -351,7 +350,10 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
             r1_pk = peaks_r1[bi] if bi < len(peaks_r1) else peaks_r1[-1]
             r0_pk = r0_for_branch[bi]
             p_mid = (r1_pk['cx'], r1_pk['row_y'])
-            p_far = (r0_pk['cx'], r0_pk['row_y']) if r0_pk else None
+            if r0_pk and r0_pk['conf'] >= cfg.FAR_ROW_CURVE_THRESH:
+                p_far = (r0_pk['cx'], r0_pk['row_y'])
+            else:
+                p_far = None
             branches.append((p_near, p_mid, p_far))
 
         # Translucent bucket rectangles for all peaks
@@ -478,7 +480,15 @@ def main():
     print(f"Device     : {device}")
 
     dataset_dir = args.dataset
-    csv_path    = os.path.join(dataset_dir, cfg.LABELS_CSV_NAME)
+    has_gt      = True
+    exts        = {".jpg", ".jpeg", ".png", ".bmp"}
+
+    # If the requested directory doesn't exist at all, drop straight to parent.
+    if not os.path.isdir(dataset_dir):
+        dataset_dir = os.path.dirname(dataset_dir)
+
+    csv_path = os.path.join(dataset_dir, cfg.LABELS_CSV_NAME)
+
     if not os.path.exists(csv_path):
         parent_dir      = os.path.dirname(dataset_dir)
         parent_csv_path = os.path.join(parent_dir, cfg.LABELS_CSV_NAME)
@@ -487,23 +497,56 @@ def main():
             dataset_dir = parent_dir
             csv_path    = parent_csv_path
         else:
-            sys.exit(f"ERROR: labels CSV not found in {dataset_dir} or {parent_dir}\n"
-                     "Edit DATASET_DIR in infer_config.py or pass --dataset.")
+            print(f"No labels.csv found — running without ground truth overlays.")
+            has_gt   = False
+            csv_path = None
+            # prefer the requested directory; fall back to parent if it doesn't
+            # exist or contains no images (e.g. no test/ subdirectory)
+            images = []
+            if os.path.isdir(dataset_dir):
+                images = sorted(f for f in os.listdir(dataset_dir)
+                                if os.path.splitext(f)[1].lower() in exts)
+            if not images:
+                if os.path.isdir(parent_dir):
+                    parent_images = sorted(f for f in os.listdir(parent_dir)
+                                           if os.path.splitext(f)[1].lower() in exts)
+                else:
+                    parent_images = []
+                if parent_images:
+                    print(f"No images in {dataset_dir}, using {parent_dir}")
+                    dataset_dir = parent_dir
+                    images      = parent_images
+                else:
+                    sys.exit(f"ERROR: no images found in {dataset_dir} or {parent_dir}")
 
-    ds = RoadDataset(csv_path=csv_path, images_dir=dataset_dir, augment=False)
+    if has_gt:
+        ds = RoadDataset(csv_path=csv_path, images_dir=dataset_dir, augment=False)
+    else:
+        ds = images   # plain list of filenames; handled below
 
     # Filter out augmented/enhanced images by filename suffix
     if cfg.EXCLUDE_SUFFIXES:
         def _is_original(filename):
             stem = os.path.splitext(filename)[0]
             return not any(stem.endswith(s) for s in cfg.EXCLUDE_SUFFIXES)
-        orig_indices = [i for i, fn in enumerate(ds.df["filename"])
-                        if _is_original(fn)]
-        n_skipped = len(ds) - len(orig_indices)
-        ds = torch.utils.data.Subset(ds, orig_indices)
+        if has_gt:
+            orig_indices = [i for i, fn in enumerate(ds.df["filename"])
+                            if _is_original(fn)]
+            n_skipped = len(ds) - len(orig_indices)
+            ds = torch.utils.data.Subset(ds, orig_indices)
+        else:
+            orig = [fn for fn in ds if _is_original(fn)]
+            n_skipped = len(ds) - len(orig)
+            ds = orig
         if n_skipped:
             print(f"Filtered   : skipped {n_skipped} enhanced images "
                   f"(suffixes: {cfg.EXCLUDE_SUFFIXES})")
+
+    import torchvision.transforms as T
+    _to_tensor = T.Compose([
+        T.ToTensor(),
+        T.Normalize(mean=model.norm_mean, std=model.norm_std),
+    ])
 
     total  = len(ds)
     print(f"Dataset    : {dataset_dir}  ({total} images)")
@@ -524,13 +567,21 @@ def main():
     with torch.no_grad():
         while 0 <= idx < total:
             if not paused:
-                image, road_present, gt_masks = ds[idx]
+                if has_gt:
+                    image, road_present, gt_masks = ds[idx]
+                    gt_t = gt_masks.cpu()
+                else:
+                    from PIL import Image as _PILImage
+                    img_path = os.path.join(dataset_dir, ds[idx])
+                    pil_img  = _PILImage.open(img_path).convert("RGB")
+                    image    = _to_tensor(pil_img)
+                    gt_t     = None
+
                 image = image.unsqueeze(0).to(device)
                 with _suppress:
                     outputs = model(image)
 
                 img_t = image.squeeze(0).cpu()
-                gt_t  = gt_masks.cpu()
                 outs  = tuple(o.cpu() for o in outputs)
 
                 frame, road_prob, pred_road, overall_conf, row_confs = \

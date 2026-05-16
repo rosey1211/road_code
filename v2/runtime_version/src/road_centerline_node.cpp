@@ -178,14 +178,16 @@ public:
         declare_parameter("road_threshold",      0.5);
         declare_parameter("min_peak_conf",       0.2);
         declare_parameter("cluster_thresh",      0.45);
-        declare_parameter("debug_mode",          false);
-        declare_parameter("min_display_height",  480);
+        declare_parameter("debug_mode",           false);
+        declare_parameter("min_display_height",   480);
+        declare_parameter("far_row_curve_thresh", 0.0);
 
-        road_threshold_     = get_parameter("road_threshold").as_double();
-        min_peak_conf_      = get_parameter("min_peak_conf").as_double();
-        cluster_thresh_     = get_parameter("cluster_thresh").as_double();
-        debug_mode_         = get_parameter("debug_mode").as_bool();
-        min_display_height_ = get_parameter("min_display_height").as_int();
+        road_threshold_      = get_parameter("road_threshold").as_double();
+        min_peak_conf_       = get_parameter("min_peak_conf").as_double();
+        cluster_thresh_      = get_parameter("cluster_thresh").as_double();
+        debug_mode_          = get_parameter("debug_mode").as_bool();
+        min_display_height_  = get_parameter("min_display_height").as_int();
+        far_row_curve_thresh_= get_parameter("far_row_curve_thresh").as_double();
 
         cfg_ = loadConfig(get_parameter("config_path").as_string());
         RCLCPP_INFO(get_logger(), "Model config: %dx%d  buckets=%d  rows=%d",
@@ -394,7 +396,8 @@ private:
                               static_cast<int>(cfg_.row_fractions[1] * h));
             cv::Point p_far (static_cast<int>(peaks[0].cx_frac * w),
                               static_cast<int>(cfg_.row_fractions[0] * h));
-            drawBranch(canvas, p_near, p_mid, &p_far, 0, w-1, lw);
+            cv::Point * p_far_ptr = (peaks[0].conf >= far_row_curve_thresh_) ? &p_far : nullptr;
+            drawBranch(canvas, p_near, p_mid, p_far_ptr, 0, w-1, lw);
 
             // Peak circles + confidence labels
             for (int r = 0; r < cfg_.n_rows; ++r) {
@@ -452,6 +455,7 @@ private:
     double road_threshold_;
     double min_peak_conf_;
     double cluster_thresh_;
+    double far_row_curve_thresh_;
     bool   debug_mode_;
     int    min_display_height_;
 

@@ -3,20 +3,21 @@
 # Edit this file before running inference — no other files need to change.
 
 import os
+import config as _train_cfg
 
 # ── Trained model ─────────────────────────────────────────────────────────────
-# Path to the checkpoint produced by train.py.
-# All model geometry (image size, n_buckets, row fractions, crop, normalisation)
-# is restored automatically from the checkpoint — no need to set them here.
-CHECKPOINT = os.path.join(os.path.dirname(__file__), "road_best.pth")
+# Defaults to MODEL_NAME set in config.py — change it there to switch models
+# across all scripts at once.  Override here only to use a different model for
+# live inference specifically.
+CHECKPOINT = _train_cfg.CHECKPOINT
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 # Directory that contains both labels.csv and the image files.
 # This can be any train/ or test/ split, or an entirely different dataset.
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data", "narrow_trail_through_trees_lr", "test")
-DATASET_DIR = os.path.join(os.path.dirname(__file__),
-                           "..", "data", "diu_gravel_road0_lr", "test")
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "diu_gravel_road0_lr", "test")
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data", "diu_gravel_road3", "test")
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
@@ -24,6 +25,29 @@ DATASET_DIR = os.path.join(os.path.dirname(__file__),
 
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data", "diu_gravel_road0", "test")
+
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "narrow_trail_through_trees_lr", "test")
+
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "sand_trail_w_puddles_lr", "test")
+
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "thinly_vegetated_terrain_w_small_trees_lr", "test")
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "thinly_vegetated_terrain_w_small_trees_lr", "test")
+
+DATASET_DIR = os.path.join(os.path.dirname(__file__),
+                           "..", "data", "fhl_concatenated_dataset", "test")
+
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "trail_w_tree_overhangs", "test")
+
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "narrow_trail_thru_trees", "test")
+
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "trail_w_vehicle_in_front", "test")
 
 # Name of the labels CSV inside DATASET_DIR.
 LABELS_CSV_NAME = "labels.csv"
@@ -95,6 +119,12 @@ FORK_HINT_PROXIMITY = 0.20
 # (|p_near.y - p_mid.y| + |p_mid.y - p_far.y|).
 # 0.5 = curve may swing at most half the vertical span sideways.
 CURVE_SWING_FACTOR = 0.5
+
+# Minimum confidence the far-row (r0) peak must have to draw the Bezier curve
+# segment between the middle scan line and the far scan line.
+# If r0's peak confidence is below this, only the near→mid segment is drawn.
+# 0.0 = always draw  (original behaviour).  0.3 = suppress weak far peaks.
+FAR_ROW_CURVE_THRESH = 0.2
 
 # Override the model's scan-line positions (row_fractions).
 # Set to a list of 3 ascending fractions, e.g. [0.35, 0.60, 0.80], to use

@@ -33,6 +33,7 @@ from PIL import Image
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
+import config
 from model     import RoadCNN
 from visualize import overlay_predictions, overlay_inference
 
@@ -193,8 +194,8 @@ def parse_args():
     mode.add_argument("--image",  type=str, help="Path to a single image file")
     mode.add_argument("--camera", action="store_true", help="Live USB camera mode")
 
-    p.add_argument("--checkpoint",    default="road_best.pth",
-                   help="Checkpoint file (default: road_best.pth)")
+    p.add_argument("--checkpoint",    default=config.CHECKPOINT,
+                   help=f"Checkpoint file (default: {config.CHECKPOINT})")
     p.add_argument("--threshold",     type=float, default=0.5,
                    help="Sigmoid threshold for bucket activation (default: 0.5)")
     p.add_argument("--camera-index",  type=int, default=0,
