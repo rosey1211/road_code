@@ -37,8 +37,17 @@ CHECKPOINT = _train_cfg.CHECKPOINT
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data", "thinly_vegetated_terrain_w_small_trees_lr", "test")
 
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "fhl_concatenated_dataset", "test")
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data/paintball", "paint_ball_r5_route_follow_forwards_lr", "test")
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data/paintball", "paint_ball_r6_route_follow_backwards_lr", "test")
+
 DATASET_DIR = os.path.join(os.path.dirname(__file__),
-                           "..", "data", "fhl_concatenated_dataset", "test")
+                           "..", "data/paintball", "paint_ball_r7_lr", "test")
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data/paintball", "r1_dense_vegetation_lr", "test")
 
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data", "trail_w_tree_overhangs", "test")
@@ -57,7 +66,8 @@ LABELS_CSV = os.path.join(DATASET_DIR, LABELS_CSV_NAME)
 
 # ── Display ───────────────────────────────────────────────────────────────────
 # Seconds between frames.  Set to 0 to wait for a keypress between each image.
-DELAY = 0.001
+DELAY = 0.1
+#DELAY = 0.001
 
 # DataLoader worker processes for image prefetching.
 # 0 = load in the main thread (safe but slow).
@@ -68,12 +78,12 @@ NUM_WORKERS = 4
 # Minimum road-present classifier probability to treat a frame as "road".
 # Predictions (circles + connecting lines) are only drawn when this threshold
 # is exceeded.
-ROAD_THRESHOLD = 0.5
+ROAD_THRESHOLD = 0.2
 
 # Minimum mean peak confidence across all three rows to accept a road prediction.
 # If the combined confidence falls below this, the frame is treated as No Road
 # regardless of what the classifier says.
-MIN_PEAK_CONF = 0.2
+MIN_PEAK_CONF = 0.1
 
 # Minimum sigmoid confidence a *secondary* peak must reach (outside the primary
 # plateau) to suppress the road prediction as ambiguous/forked.
@@ -91,11 +101,13 @@ CLUSTER_THRESH_FRAC = 0.45
 #
 # How much to boost a cluster's effective confidence based on proximity to the
 # previous frame's peak.  0.0 = disabled.  0.4 = 40% boost at zero distance.
-TEMPORAL_BIAS_WEIGHT = 0.4
+#TEMPORAL_BIAS_WEIGHT = 0.4
+TEMPORAL_BIAS_WEIGHT = 0.1
 #
 # Distance (as fraction of image width) over which the proximity bonus decays
 # to zero.  0.25 = bias applies within the nearest 25% of image width.
-TEMPORAL_PROXIMITY_RANGE = 0.25
+#TEMPORAL_PROXIMITY_RANGE = 0.25
+TEMPORAL_PROXIMITY_RANGE = 0.1
 
 # Per-frame decay applied to road confidence when the current frame says no-road.
 # 0.0 = instant dropout.  0.6 = fades over ~3 frames.  0.85 = very sticky.
@@ -124,7 +136,7 @@ CURVE_SWING_FACTOR = 0.5
 # segment between the middle scan line and the far scan line.
 # If r0's peak confidence is below this, only the near→mid segment is drawn.
 # 0.0 = always draw  (original behaviour).  0.3 = suppress weak far peaks.
-FAR_ROW_CURVE_THRESH = 0.2
+FAR_ROW_CURVE_THRESH = 0.1
 
 # Override the model's scan-line positions (row_fractions).
 # Set to a list of 3 ascending fractions, e.g. [0.35, 0.60, 0.80], to use

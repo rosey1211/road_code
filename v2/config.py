@@ -4,7 +4,7 @@
 
 # ── Dataset selection ─────────────────────────────────────────────────────────
 # Name of the dataset directory inside data/.
-DATASET_NAME = "fhl_diverse_training_data"
+DATASET_NAME = "paintball_diverse_training_data"
 
 # ── Model input size (training resolution) ────────────────────────────────────
 # Any input image will be automatically resized to these dimensions inside the
@@ -64,7 +64,7 @@ GAUSSIAN_SIGMA = 1.0
 # ── Training hyperparameters ──────────────────────────────────────────────────
 #BATCH_SIZE    = 1
 BATCH_SIZE    = 16
-EPOCHS        = 40
+EPOCHS        = 200
 LR            = 0.002
 VAL_SPLIT     = 0.15   # fraction of data used for validation
 VIS_INTERVAL  = 0      # write a mid-epoch snapshot every N batches (0 = off)
@@ -82,7 +82,7 @@ TEST_DATASET_INFO  = os.path.join(TEST_DIR,  "dataset.info")
 # Name of the model checkpoint (no extension).
 # All inference scripts (live_infer.py, infer.py, test.py) use this as their
 # default checkpoint.  Change it here and every script picks up the new model.
-MODEL_NAME      = "fhl_road_best"
+MODEL_NAME      = "paintball_road_best"
 CHECKPOINT      = os.path.join(os.path.dirname(__file__), MODEL_NAME + ".pth")
 
 # ── ImageNet normalisation constants ─────────────────────────────────────────
