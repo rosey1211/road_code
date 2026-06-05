@@ -4,7 +4,8 @@
 
 # ── Dataset selection ─────────────────────────────────────────────────────────
 # Name of the dataset directory inside data/.
-DATASET_NAME = "paintball_diverse_training_data"
+#DATASET_NAME = "paintball_diverse_training_data"
+DATASET_NAME = "west_virginia_lr"
 
 # ── Model input size (training resolution) ────────────────────────────────────
 # Any input image will be automatically resized to these dimensions inside the
@@ -82,7 +83,8 @@ TEST_DATASET_INFO  = os.path.join(TEST_DIR,  "dataset.info")
 # Name of the model checkpoint (no extension).
 # All inference scripts (live_infer.py, infer.py, test.py) use this as their
 # default checkpoint.  Change it here and every script picks up the new model.
-MODEL_NAME      = "paintball_road_best"
+#MODEL_NAME      = "paintball_road_best"
+MODEL_NAME      = "west_virginia_road_best"
 CHECKPOINT      = os.path.join(os.path.dirname(__file__), MODEL_NAME + ".pth")
 
 # ── ImageNet normalisation constants ─────────────────────────────────────────
