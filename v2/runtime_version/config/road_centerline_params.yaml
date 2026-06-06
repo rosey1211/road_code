@@ -15,6 +15,7 @@ road_centerline_node:
     min_peak_conf:   0.2    # min mean peak confidence across rows
     cluster_thresh:  0.45   # min fraction of row peak for bucket to join cluster
     far_row_curve_thresh: 0.2  # min r0 confidence to draw mid→far Bezier segment
+    fork_confirm_frames:  4    # consecutive frames both r1 and r0 must show 2+ peaks before drawing a fork
 
     # ── Visualisation ─────────────────────────────────────────────────────────
     debug_mode:        false   # overlay sigmoid response bars on each scan row

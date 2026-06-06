@@ -202,7 +202,7 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
             peak_b = int(probs.argmax().item())
             cx = _bucket_cx(peak_b, ri)
             return [{'cx': cx, 'bl': peak_b, 'br': peak_b,
-                     'conf': peak_conf, 'row_y': row_y}], peak_conf, 0
+                     'conf': peak_conf, 'row_y': row_y}], peak_conf, 0, cx
 
         def _cluster_info(b_l, b_r):
             conf = max(p_vals[b] for b in range(b_l, b_r + 1))
@@ -244,12 +244,13 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
             if secondary['conf'] >= sec_thresh:
                 result.append(secondary)
 
+        primary_cx = primary['cx']   # temporal-bias winner; save before cx-sort
         result.sort(key=lambda x: x['cx'])
         # Count only clusters strong enough to be genuinely multimodal
         _SIGNIFICANT_FRAC = 0.5
         n_significant = sum(1 for cp in cluster_peaks
                             if cp['conf'] >= primary_conf * _SIGNIFICANT_FRAC)
-        return result, primary_conf, n_significant
+        return result, primary_conf, n_significant, primary_cx
 
     def _draw_branch(p_near, p_mid, p_far, x_lo=0, x_hi=None):
         """Straight line near→mid, then cubic Bezier mid→far (if far exists).
@@ -281,9 +282,16 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
         _chord_hat = _chord / _chord_len if _chord_len > 0 else _tdir_s
         _tdir_e = 2.0 * float(np.dot(_tdir_s, _chord_hat)) * _chord_hat - _tdir_s
         _alpha = _chord_len / 3.0
+        _cp1 = _p1 + _alpha * _tdir_s
+        _cp2 = _p0 - _alpha * _tdir_e
+        # Clamp control-point y so neither goes above the far scan line.
+        # Bezier convex-hull property: if all four control points have y >= p_far[1]
+        # then every point on the curve does too — no flat segments, still smooth.
+        _cp1[1] = max(_cp1[1], _p0[1])
+        _cp2[1] = max(_cp2[1], _p0[1])
         _t = np.linspace(0, 1, max(20, int(_chord_len)))
-        _bez = (np.outer((1-_t)**3, _p1) + np.outer(3*(1-_t)**2*_t, (_p1 + _alpha*_tdir_s)) +
-                np.outer(3*(1-_t)*_t**2, (_p0 - _alpha*_tdir_e)) + np.outer(_t**3, _p0))
+        _bez = (np.outer((1-_t)**3, _p1) + np.outer(3*(1-_t)**2*_t, _cp1) +
+                np.outer(3*(1-_t)*_t**2, _cp2) + np.outer(_t**3, _p0))
         _bp = _bez.astype(np.int32)
         _bp[:, 0] = _bp[:, 0].clip(x_lo, x_hi)
         _bp[:, 1] = _bp[:, 1].clip(0, h - 1)
@@ -292,13 +300,13 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
     # Find peaks farthest→nearest so r0 peaks can hint at r1 secondary peaks.
     # Previous frame's primary cx biases cluster selection to resolve ambiguity.
     prev_cx = state.get('prev_cx', [None, None, None])
-    peaks_r0, conf_r0, ncl_r0 = _find_row_peaks(0, row_logits[0],
-                                                  prev_cx=prev_cx[0])
-    peaks_r1, conf_r1, ncl_r1 = _find_row_peaks(1, row_logits[1],
-                                                  hint_peaks=peaks_r0,
-                                                  prev_cx=prev_cx[1])
-    peaks_r2, conf_r2, ncl_r2 = _find_row_peaks(2, row_logits[2],
-                                                  prev_cx=prev_cx[2])
+    peaks_r0, conf_r0, ncl_r0, pcx_r0 = _find_row_peaks(0, row_logits[0],
+                                                           prev_cx=prev_cx[0])
+    peaks_r1, conf_r1, ncl_r1, pcx_r1 = _find_row_peaks(1, row_logits[1],
+                                                           hint_peaks=peaks_r0,
+                                                           prev_cx=prev_cx[1])
+    peaks_r2, conf_r2, ncl_r2, pcx_r2 = _find_row_peaks(2, row_logits[2],
+                                                           prev_cx=prev_cx[2])
     row_confs = [conf_r0, conf_r1, conf_r2]
     overall_conf = sum(row_confs) / 3.0
 
@@ -313,6 +321,7 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
         state['road_momentum'] = 1.0
     else:
         state['road_momentum'] = state.get('road_momentum', 0.0) * cfg.ROAD_MOMENTUM_DECAY
+        state['fork_frames'] = 0   # reset fork tracking whenever raw road signal drops
         if state['road_momentum'] >= cfg.ROAD_MOMENTUM_THRESH:
             prev = state.get('prev_peaks')
             if prev is not None:
@@ -320,8 +329,14 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
                 road_present = True
 
     if road_present:
-        # Determine branches: fork if >1 peak on middle or far row
-        n_branches = min(max(len(peaks_r1), len(peaks_r0)), 2)
+        # Fork confirmation: both r1 (mid) and r0 (far) must show 2+ peaks for
+        # FORK_CONFIRM_FRAMES consecutive road-present frames before drawing a fork.
+        fork_raw = (len(peaks_r1) >= 2 and len(peaks_r0) >= 2)
+        if fork_raw:
+            state['fork_frames'] = state.get('fork_frames', 0) + 1
+        else:
+            state['fork_frames'] = 0
+        n_branches = 2 if state['fork_frames'] >= cfg.FORK_CONFIRM_FRAMES else 1
 
         # Match each r0 peak to the spatially nearest r1 branch.
         # 1 r0 peak  → assign to the closest r1 branch; other branch gets None.
@@ -342,12 +357,17 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
                 else:
                     r0_for_branch = [peaks_r0[0], peaks_r0[1]]
         elif n_branches == 1 and len(peaks_r0) >= 1:
-            r0_for_branch = [peaks_r0[0]]
+            # Use primary r0 peak (closest to the temporal-bias winner), not leftmost
+            r0_for_branch = [min(peaks_r0, key=lambda p: abs(p['cx'] - pcx_r0))]
 
         p_near = (peaks_r2[0]['cx'], peaks_r2[0]['row_y'])
         branches = []
         for bi in range(n_branches):
-            r1_pk = peaks_r1[bi] if bi < len(peaks_r1) else peaks_r1[-1]
+            if n_branches == 1:
+                # Single branch: always draw to the temporal-bias winner, not leftmost
+                r1_pk = min(peaks_r1, key=lambda p: abs(p['cx'] - pcx_r1))
+            else:
+                r1_pk = peaks_r1[bi] if bi < len(peaks_r1) else peaks_r1[-1]
             r0_pk = r0_for_branch[bi]
             p_mid = (r1_pk['cx'], r1_pk['row_y'])
             if r0_pk and r0_pk['conf'] >= cfg.FAR_ROW_CURVE_THRESH:
@@ -384,11 +404,7 @@ def _build_frame(image_tensor, outputs, gt_masks, model, state):
             _draw_branch(p_near, p_mid, p_far, x_lo=x_lo, x_hi=x_hi)
 
         # Store peaks for next frame's disambiguation and momentum fallback
-        state['prev_cx'] = [
-            peaks_r0[0]['cx'] if peaks_r0 else None,
-            peaks_r1[0]['cx'] if peaks_r1 else None,
-            peaks_r2[0]['cx'] if peaks_r2 else None,
-        ]
+        state['prev_cx'] = [pcx_r0, pcx_r1, pcx_r2]
         state['prev_peaks'] = [peaks_r0, peaks_r1, peaks_r2]
 
         # Filled circles for all peaks
@@ -561,7 +577,7 @@ def main():
 
     idx          = 0
     paused       = False
-    state        = {'prev_cx': [None, None, None], 'prev_peaks': None, 'road_momentum': 0.0}
+    state        = {'prev_cx': [None, None, None], 'prev_peaks': None, 'road_momentum': 0.0, 'fork_frames': 0}
     _rate_count  = 0
     _rate_start  = time.time()
     with torch.no_grad():
@@ -604,11 +620,11 @@ def main():
             elif key == ord("f"):
                 idx = min(idx + 50, total - 1)
                 paused = False
-                state.update({'prev_cx': [None, None, None], 'prev_peaks': None, 'road_momentum': 0.0})
+                state.update({'prev_cx': [None, None, None], 'prev_peaks': None, 'road_momentum': 0.0, 'fork_frames': 0})
             elif key == ord("b"):
                 idx = max(idx - 50, 0)
                 paused = False
-                state.update({'prev_cx': [None, None, None], 'prev_peaks': None, 'road_momentum': 0.0})
+                state.update({'prev_cx': [None, None, None], 'prev_peaks': None, 'road_momentum': 0.0, 'fork_frames': 0})
             elif not paused:
                 idx += 1
 

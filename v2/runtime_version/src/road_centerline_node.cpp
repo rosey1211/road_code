@@ -66,17 +66,21 @@ static ModelConfig loadConfig(const std::string & path)
 struct Peak {
     double cx_frac;
     float  conf;
+    bool   is_primary = false;  // true for the highest-confidence cluster winner
 };
 
-static Peak findPrimaryPeak(const std::vector<float>       & probs,
-                             const std::vector<double>      & edges,
-                             float                            cluster_thresh_frac)
+// Returns all significant cluster peaks sorted left-to-right.
+// A secondary peak must reach fork_suppress_thresh × primary confidence to be included.
+static std::vector<Peak> findAllPeaks(const std::vector<float> & probs,
+                                       const std::vector<double>& edges,
+                                       float cluster_thresh_frac,
+                                       float fork_suppress_thresh = 0.9f)
 {
     int   n         = static_cast<int>(probs.size());
     float peak_conf = *std::max_element(probs.begin(), probs.end());
     float thresh    = std::max(0.05f, peak_conf * cluster_thresh_frac);
 
-    struct Cluster { int lo, hi; float peak_conf; };
+    struct Cluster { int lo, hi; float peak_conf; double cx_frac; };
     std::vector<Cluster> clusters;
     int start = -1;
     for (int b = 0; b < n; ++b) {
@@ -84,31 +88,54 @@ static Peak findPrimaryPeak(const std::vector<float>       & probs,
             if (start < 0) start = b;
         } else if (start >= 0) {
             float pc = *std::max_element(probs.begin()+start, probs.begin()+b);
-            clusters.push_back({start, b-1, pc});
+            double tw = 0, wx = 0;
+            for (int i = start; i < b; ++i) {
+                double cx = (edges[i] + edges[i+1]) * 0.5;
+                tw += probs[i]; wx += cx * probs[i];
+            }
+            clusters.push_back({start, b-1, pc, tw > 0 ? wx/tw : (edges[start]+edges[b])*0.5});
             start = -1;
         }
     }
     if (start >= 0) {
         float pc = *std::max_element(probs.begin()+start, probs.end());
-        clusters.push_back({start, n-1, pc});
-    }
-
-    auto computeCx = [&](int lo, int hi) -> double {
         double tw = 0, wx = 0;
-        for (int b = lo; b <= hi; ++b) {
-            double cx = (edges[b] + edges[b+1]) * 0.5;
-            tw += probs[b]; wx += cx * probs[b];
+        for (int i = start; i < n; ++i) {
+            double cx = (edges[i] + edges[i+1]) * 0.5;
+            tw += probs[i]; wx += cx * probs[i];
         }
-        return tw > 0 ? wx/tw : (edges[lo]+edges[hi+1])*0.5;
-    };
+        clusters.push_back({start, n-1, pc, tw > 0 ? wx/tw : (edges[start]+edges[n])*0.5});
+    }
 
     if (clusters.empty()) {
-        int pb = static_cast<int>(std::max_element(probs.begin(),probs.end())-probs.begin());
-        return {(edges[pb]+edges[pb+1])*0.5, peak_conf};
+        int pb = static_cast<int>(std::max_element(probs.begin(), probs.end()) - probs.begin());
+        return {{(edges[pb]+edges[pb+1])*0.5, peak_conf, true}};
     }
-    auto best = std::max_element(clusters.begin(), clusters.end(),
-        [](const Cluster & a, const Cluster & b){ return a.peak_conf < b.peak_conf; });
-    return {computeCx(best->lo, best->hi), best->peak_conf};
+
+    // Sort by confidence descending to identify primary vs secondary
+    std::sort(clusters.begin(), clusters.end(),
+        [](const Cluster & a, const Cluster & b){ return a.peak_conf > b.peak_conf; });
+
+    float primary_conf = clusters[0].peak_conf;
+    std::vector<Peak> result;
+    result.push_back({clusters[0].cx_frac, clusters[0].peak_conf, true});   // primary
+
+    // Accept secondary only if it meets the fork suppression threshold
+    if (clusters.size() > 1 && clusters[1].peak_conf >= primary_conf * fork_suppress_thresh)
+        result.push_back({clusters[1].cx_frac, clusters[1].peak_conf, false}); // secondary
+
+    // Sort left-to-right for fork drawing (primary may no longer be [0])
+    std::sort(result.begin(), result.end(),
+        [](const Peak & a, const Peak & b){ return a.cx_frac < b.cx_frac; });
+    return result;
+}
+
+// Returns the highest-confidence (primary) peak from a row's peak list.
+// After sorting by cx_frac the primary may be at any index, so we search by flag.
+static const Peak & primaryOf(const std::vector<Peak> & peaks)
+{
+    for (const auto & p : peaks) if (p.is_primary) return p;
+    return peaks[0];   // fallback: should never be reached
 }
 
 // ── Drawing helpers ────────────────────────────────────────────────────────────
@@ -138,6 +165,13 @@ static void drawBranch(cv::Mat & canvas,
     double dot    = tdir_s.x*chord_hat.x + tdir_s.y*chord_hat.y;
     cv::Point2d tdir_e = 2.0*dot*chord_hat - tdir_s;
     double alpha  = chord_len / 3.0;
+    cv::Point2d cp1 = _p1 + alpha * tdir_s;
+    cv::Point2d cp2 = _p0 - alpha * tdir_e;
+    // Clamp control-point y so neither goes above the far scan line.
+    // Bezier convex-hull property: if all four control points have y >= _p0.y
+    // then every point on the curve does too — no flat segments, still smooth.
+    cp1.y = std::max(cp1.y, _p0.y);
+    cp2.y = std::max(cp2.y, _p0.y);
 
     // Swing budget: constrain lateral excursion to 0.5 × vertical span
     double swing = 0.5 * (std::abs(_p1.y - _p2.y) + std::abs(_p0.y - _p1.y));
@@ -152,8 +186,8 @@ static void drawBranch(cv::Mat & canvas,
         double t = static_cast<double>(i) / n_pts;
         double mt = 1.0 - t;
         cv::Point2d p = mt*mt*mt*_p1
-                      + 3*mt*mt*t*(_p1 + alpha*tdir_s)
-                      + 3*mt*t*t*(_p0 - alpha*tdir_e)
+                      + 3*mt*mt*t*cp1
+                      + 3*mt*t*t*cp2
                       + t*t*t*_p0;
         int x = std::clamp(static_cast<int>(std::round(p.x)), x_lo, x_hi);
         int y = std::clamp(static_cast<int>(std::round(p.y)), 0, canvas.rows-1);
@@ -181,6 +215,7 @@ public:
         declare_parameter("debug_mode",           false);
         declare_parameter("min_display_height",   480);
         declare_parameter("far_row_curve_thresh", 0.0);
+        declare_parameter("fork_confirm_frames",  4);
 
         road_threshold_      = get_parameter("road_threshold").as_double();
         min_peak_conf_       = get_parameter("min_peak_conf").as_double();
@@ -188,6 +223,7 @@ public:
         debug_mode_          = get_parameter("debug_mode").as_bool();
         min_display_height_  = get_parameter("min_display_height").as_int();
         far_row_curve_thresh_= get_parameter("far_row_curve_thresh").as_double();
+        fork_confirm_frames_ = get_parameter("fork_confirm_frames").as_int();
 
         cfg_ = loadConfig(get_parameter("config_path").as_string());
         RCLCPP_INFO(get_logger(), "Model config: %dx%d  buckets=%d  rows=%d",
@@ -258,20 +294,30 @@ private:
         float road_prob   = torch::softmax(cls_logits, 0)[1].item<float>();
         bool  road_present = road_prob > road_threshold_;
 
-        // Per-row peak detection
-        std::vector<Peak>              peaks(3);
+        // Per-row peak detection (all cluster peaks for fork awareness)
+        std::vector<std::vector<Peak>> all_peaks(3);
         std::vector<std::vector<float>> row_probs(3);
         float conf_sum = 0.0f;
         for (int r = 0; r < 3; ++r) {
             auto sig = torch::sigmoid(row_logits[r]);
             row_probs[r].assign(sig.data_ptr<float>(),
                                  sig.data_ptr<float>() + cfg_.n_buckets);
-            peaks[r] = findPrimaryPeak(row_probs[r], cfg_.bucket_edges[r],
-                                        static_cast<float>(cluster_thresh_));
-            conf_sum += peaks[r].conf;
+            all_peaks[r] = findAllPeaks(row_probs[r], cfg_.bucket_edges[r],
+                                         static_cast<float>(cluster_thresh_));
+            conf_sum += primaryOf(all_peaks[r]).conf;
         }
         float mean_conf = conf_sum / 3.0f;
         if (mean_conf < min_peak_conf_) road_present = false;
+
+        // Fork confirmation: both r1 (mid) and r0 (far) must show 2+ peaks for
+        // fork_confirm_frames_ consecutive road-present frames before drawing a fork.
+        bool fork_raw = road_present && (all_peaks[1].size() >= 2 && all_peaks[0].size() >= 2);
+        if (fork_raw) {
+            fork_frame_count_++;
+        } else {
+            fork_frame_count_ = 0;
+        }
+        bool draw_fork = road_present && (fork_frame_count_ >= fork_confirm_frames_);
 
         // ── Publish CenterlineResult ──────────────────────────────────────────
         road_centerline::msg::CenterlineResult result;
@@ -279,13 +325,14 @@ private:
         result.road_present    = road_present;
         result.road_confidence = road_prob;
         result.peak_confidence = mean_conf;
-        for (int r = 0; r < 3; ++r) result.row_confidences[r] = peaks[r].conf;
+        for (int r = 0; r < 3; ++r) result.row_confidences[r] = primaryOf(all_peaks[r]).conf;
         if (road_present) {
             for (int r = 2; r >= 0; --r) {
+                const Peak & pk = primaryOf(all_peaks[r]);
                 geometry_msgs::msg::Point32 pt;
-                pt.x = static_cast<float>(peaks[r].cx_frac);
+                pt.x = static_cast<float>(pk.cx_frac);
                 pt.y = static_cast<float>(cfg_.row_fractions[r]);
-                pt.z = peaks[r].conf;
+                pt.z = pk.conf;
                 result.points.push_back(pt);
             }
         }
@@ -293,9 +340,12 @@ private:
 
         // ── Build and publish visual ──────────────────────────────────────────
         if (visual_pub_->get_subscription_count() > 0) {
-            auto vis = buildVisual(resized, row_logits, row_probs, peaks,
+            auto vis = buildVisual(resized, row_logits, row_probs, all_peaks,
                                    road_present, road_prob, mean_conf,
-                                   std::vector<float>{peaks[0].conf, peaks[1].conf, peaks[2].conf});
+                                   std::vector<float>{primaryOf(all_peaks[0]).conf,
+                                                       primaryOf(all_peaks[1]).conf,
+                                                       primaryOf(all_peaks[2]).conf},
+                                   draw_fork);
             std_msgs::msg::Header hdr = msg->header;
             auto vis_msg = cv_bridge::CvImage(hdr, "bgr8", vis).toImageMsg();
             visual_pub_->publish(*vis_msg);
@@ -303,14 +353,15 @@ private:
     }
 
     // ── Visual overlay builder ────────────────────────────────────────────────
-    cv::Mat buildVisual(const cv::Mat                  & src_bgr,
-                        const std::vector<torch::Tensor> & row_logits,
-                        const std::vector<std::vector<float>> & row_probs,
-                        const std::vector<Peak>          & peaks,
+    cv::Mat buildVisual(const cv::Mat                        & src_bgr,
+                        const std::vector<torch::Tensor>     & row_logits,
+                        const std::vector<std::vector<float>>& row_probs,
+                        const std::vector<std::vector<Peak>> & all_peaks,
                         bool   road_present,
                         float  road_prob,
                         float  mean_conf,
-                        const std::vector<float>         & row_confs)
+                        const std::vector<float>             & row_confs,
+                        bool   draw_fork)
     {
         // Upscale small images to min_display_height
         cv::Mat canvas = src_bgr.clone();
@@ -369,51 +420,99 @@ private:
         }
 
         if (road_present) {
-            // Translucent peak rectangles
+            // Translucent peak rectangles (all peaks when fork is confirmed)
             cv::Mat overlay = canvas.clone();
             int rect_hh = std::max(2, h/30);
             for (int r = 0; r < cfg_.n_rows; ++r) {
-                int cx  = static_cast<int>(peaks[r].cx_frac * w);
                 int row_y = static_cast<int>(cfg_.row_fractions[r] * h);
-                // find nearest bucket
-                int best_b = 0;
-                double best_d = 1e9;
-                for (int b = 0; b < cfg_.n_buckets; ++b) {
-                    double d = std::abs(bucketCx(r,b) - cx);
-                    if (d < best_d) { best_d = d; best_b = b; }
+                int n_pks = (draw_fork && r < 2) ? static_cast<int>(all_peaks[r].size()) : 1;
+                for (int pi = 0; pi < n_pks; ++pi) {
+                    // In fork mode use sorted (left→right) order; otherwise use primary
+                    const Peak & pk = (n_pks > 1) ? all_peaks[r][pi] : primaryOf(all_peaks[r]);
+                    int cx = static_cast<int>(pk.cx_frac * w);
+                    int best_b = 0; double best_d = 1e9;
+                    for (int b = 0; b < cfg_.n_buckets; ++b) {
+                        double d = std::abs(bucketCx(r,b) - cx);
+                        if (d < best_d) { best_d = d; best_b = b; }
+                    }
+                    int bx0 = edgePx(r, best_b);
+                    int bx1 = edgePx(r, best_b+1);
+                    cv::rectangle(overlay, {bx0, row_y-rect_hh}, {bx1, row_y+rect_hh},
+                                  _PRED, cv::FILLED);
                 }
-                int bx0 = edgePx(r, best_b);
-                int bx1 = edgePx(r, best_b+1);
-                cv::rectangle(overlay, {bx0, row_y-rect_hh}, {bx1, row_y+rect_hh},
-                              _PRED, cv::FILLED);
             }
             cv::addWeighted(overlay, 0.35, canvas, 0.65, 0, canvas);
 
-            // Convert peak fractions to pixel coords
-            cv::Point p_near(static_cast<int>(peaks[2].cx_frac * w),
+            // Near point (r2): always use the primary peak
+            cv::Point p_near(static_cast<int>(primaryOf(all_peaks[2]).cx_frac * w),
                               static_cast<int>(cfg_.row_fractions[2] * h));
-            cv::Point p_mid (static_cast<int>(peaks[1].cx_frac * w),
-                              static_cast<int>(cfg_.row_fractions[1] * h));
-            cv::Point p_far (static_cast<int>(peaks[0].cx_frac * w),
-                              static_cast<int>(cfg_.row_fractions[0] * h));
-            cv::Point * p_far_ptr = (peaks[0].conf >= far_row_curve_thresh_) ? &p_far : nullptr;
-            drawBranch(canvas, p_near, p_mid, p_far_ptr, 0, w-1, lw);
 
-            // Peak circles + confidence labels
+            if (draw_fork && all_peaks[1].size() >= 2) {
+                // Match r0 peaks to r1 branches (optimal 1-to-1 assignment)
+                std::vector<const Peak*> r0_for_branch(2, nullptr);
+                if (all_peaks[0].size() == 1) {
+                    double d0 = std::abs(all_peaks[0][0].cx_frac - all_peaks[1][0].cx_frac);
+                    double d1 = std::abs(all_peaks[0][0].cx_frac - all_peaks[1][1].cx_frac);
+                    r0_for_branch[d0 <= d1 ? 0 : 1] = &all_peaks[0][0];
+                } else if (all_peaks[0].size() >= 2) {
+                    double a0 = all_peaks[0][0].cx_frac, a1 = all_peaks[0][1].cx_frac;
+                    double b0 = all_peaks[1][0].cx_frac, b1 = all_peaks[1][1].cx_frac;
+                    if (std::abs(b0-a1)+std::abs(b1-a0) < std::abs(b0-a0)+std::abs(b1-a1)) {
+                        r0_for_branch[0] = &all_peaks[0][1];
+                        r0_for_branch[1] = &all_peaks[0][0];
+                    } else {
+                        r0_for_branch[0] = &all_peaks[0][0];
+                        r0_for_branch[1] = &all_peaks[0][1];
+                    }
+                }
+                int sep_x = (static_cast<int>(all_peaks[1][0].cx_frac * w) +
+                             static_cast<int>(all_peaks[1][1].cx_frac * w)) / 2;
+                for (int bi = 0; bi < 2; ++bi) {
+                    cv::Point p_mid(static_cast<int>(all_peaks[1][bi].cx_frac * w),
+                                    static_cast<int>(cfg_.row_fractions[1] * h));
+                    cv::Point p_far_val;
+                    cv::Point * p_far_ptr = nullptr;
+                    if (r0_for_branch[bi] && r0_for_branch[bi]->conf >= far_row_curve_thresh_) {
+                        p_far_val = cv::Point(
+                            static_cast<int>(r0_for_branch[bi]->cx_frac * w),
+                            static_cast<int>(cfg_.row_fractions[0] * h));
+                        p_far_ptr = &p_far_val;
+                    }
+                    int x_lo = (bi == 0) ? 0     : sep_x;
+                    int x_hi = (bi == 0) ? sep_x : w - 1;
+                    drawBranch(canvas, p_near, p_mid, p_far_ptr, x_lo, x_hi, lw);
+                }
+            } else {
+                // Single branch: use primary peaks, not leftmost
+                const Peak & r1_pk = primaryOf(all_peaks[1]);
+                const Peak & r0_pk = primaryOf(all_peaks[0]);
+                cv::Point p_mid(static_cast<int>(r1_pk.cx_frac * w),
+                                 static_cast<int>(cfg_.row_fractions[1] * h));
+                cv::Point p_far(static_cast<int>(r0_pk.cx_frac * w),
+                                 static_cast<int>(cfg_.row_fractions[0] * h));
+                cv::Point * p_far_ptr = (r0_pk.conf >= far_row_curve_thresh_) ? &p_far : nullptr;
+                drawBranch(canvas, p_near, p_mid, p_far_ptr, 0, w-1, lw);
+            }
+
+            // Peak circles + confidence labels (all peaks when fork is confirmed)
             for (int r = 0; r < cfg_.n_rows; ++r) {
-                int cx    = static_cast<int>(peaks[r].cx_frac * w);
                 int row_y = static_cast<int>(cfg_.row_fractions[r] * h);
-                cv::circle(canvas, {cx, row_y}, cr,    _PRED,              cv::FILLED, cv::LINE_AA);
-                cv::circle(canvas, {cx, row_y}, cr,    cv::Scalar(80,40,10), 1,         cv::LINE_AA);
-                cv::circle(canvas, {cx, row_y}, dot_r, cv::Scalar(255,255,255), cv::FILLED, cv::LINE_AA);
-
-                std::string txt = std::to_string(static_cast<int>(peaks[r].conf * 100)) + "%";
-                int tx  = std::min(cx + std::max(2, static_cast<int>(4*s)), w - 40);
-                int ty  = row_y - std::max(2, static_cast<int>(4*s));
-                cv::putText(canvas, txt, {tx,ty}, cv::FONT_HERSHEY_PLAIN, fs,
-                            cv::Scalar(0,0,0), 2, cv::LINE_AA);
-                cv::putText(canvas, txt, {tx,ty}, cv::FONT_HERSHEY_PLAIN, fs,
-                            _PRED,             1, cv::LINE_AA);
+                int n_pks = (draw_fork && r < 2) ? static_cast<int>(all_peaks[r].size()) : 1;
+                for (int pi = 0; pi < n_pks; ++pi) {
+                    const Peak & pk = (n_pks > 1) ? all_peaks[r][pi] : primaryOf(all_peaks[r]);
+                    int cx     = static_cast<int>(pk.cx_frac * w);
+                    float conf = pk.conf;
+                    cv::circle(canvas, {cx, row_y}, cr,    _PRED,                  cv::FILLED, cv::LINE_AA);
+                    cv::circle(canvas, {cx, row_y}, cr,    cv::Scalar(80,40,10), 1,            cv::LINE_AA);
+                    cv::circle(canvas, {cx, row_y}, dot_r, cv::Scalar(255,255,255), cv::FILLED, cv::LINE_AA);
+                    std::string txt = std::to_string(static_cast<int>(conf * 100)) + "%";
+                    int tx = std::min(cx + std::max(2, static_cast<int>(4*s)), w - 40);
+                    int ty = row_y - std::max(2, static_cast<int>(4*s));
+                    cv::putText(canvas, txt, {tx,ty}, cv::FONT_HERSHEY_PLAIN, fs,
+                                cv::Scalar(0,0,0), 2, cv::LINE_AA);
+                    cv::putText(canvas, txt, {tx,ty}, cv::FONT_HERSHEY_PLAIN, fs,
+                                _PRED,             1, cv::LINE_AA);
+                }
             }
         }
 
@@ -458,6 +557,8 @@ private:
     double far_row_curve_thresh_;
     bool   debug_mode_;
     int    min_display_height_;
+    int    fork_confirm_frames_;
+    int    fork_frame_count_ = 0;
 
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
     rclcpp::Publisher<road_centerline::msg::CenterlineResult>::SharedPtr result_pub_;

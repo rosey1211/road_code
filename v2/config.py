@@ -69,6 +69,9 @@ EPOCHS        = 200
 LR            = 0.002
 VAL_SPLIT     = 0.15   # fraction of data used for validation
 VIS_INTERVAL  = 0      # write a mid-epoch snapshot every N batches (0 = off)
+# Stop training if val loss does not improve for this many consecutive epochs.
+# Set to 0 to disable early stopping.
+EARLY_STOP_PATIENCE = 15
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 import os

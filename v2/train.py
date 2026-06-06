@@ -164,9 +164,10 @@ def run_epoch(loader, train=True, epoch=0):
     return total_loss/n, cls_loss_sum/n, row_loss_sum/n, correct_cls/n
 
 # ─── Training loop ────────────────────────────────────────────────────────────
-best_val_loss = float("inf")
-best_epoch    = None
-total_start   = time.time()
+best_val_loss    = float("inf")
+best_epoch       = None
+no_improve_count = 0
+total_start      = time.time()
 metrics_path  = os.path.join(os.path.dirname(config.CHECKPOINT), "metrics.png")
 history = {k: [] for k in
            ["tr_loss", "va_loss", "tr_cls", "va_cls",
@@ -187,8 +188,9 @@ for epoch in range(1, config.EPOCHS + 1):
     epoch_time = time.time() - epoch_start
     is_best    = va_loss < best_val_loss
     if is_best:
-        best_val_loss = va_loss
-        best_epoch    = epoch
+        best_val_loss    = va_loss
+        best_epoch       = epoch
+        no_improve_count = 0
         torch.save({
             # Weights
             "model_state":   model.state_dict(),
@@ -218,9 +220,15 @@ for epoch in range(1, config.EPOCHS + 1):
     else:
         trend = "  → plateau"
 
+    if not is_best:
+        no_improve_count += 1
+
     marker = "  ★ best" if is_best else ""
+    early_stop_note = ""
+    if config.EARLY_STOP_PATIENCE > 0 and not is_best:
+        early_stop_note = f"  (no improvement {no_improve_count}/{config.EARLY_STOP_PATIENCE})"
     print(f"  Train  →  loss: {tr_loss:.4f}  cls: {tr_cls:.4f}  row: {tr_row:.4f}  acc: {tr_acc*100:.1f}%")
-    print(f"  Val    →  loss: {va_loss:.4f}  cls: {va_cls:.4f}  row: {va_row:.4f}  acc: {va_acc*100:.1f}%{marker}{trend}")
+    print(f"  Val    →  loss: {va_loss:.4f}  cls: {va_cls:.4f}  row: {va_row:.4f}  acc: {va_acc*100:.1f}%{marker}{trend}{early_stop_note}")
     print(f"  Time   →  {epoch_time:.1f}s  |  elapsed: {time.time()-total_start:.0f}s")
 
     # ── Append to history and save metrics plot ───────────────────────────────
@@ -250,6 +258,15 @@ for epoch in range(1, config.EPOCHS + 1):
     plt.close("all")
     torch.cuda.empty_cache()
     print()
+
+    # ── Early stopping ────────────────────────────────────────────────────────
+    if config.EARLY_STOP_PATIENCE > 0 and no_improve_count >= config.EARLY_STOP_PATIENCE:
+        print(f"  Early stopping: val loss has not improved for "
+              f"{config.EARLY_STOP_PATIENCE} consecutive epochs.")
+        print(f"  Best checkpoint is epoch {best_epoch}  "
+              f"(val loss {best_val_loss:.4f})  →  {config.CHECKPOINT}")
+        print()
+        break
 
 total_time = time.time() - total_start
 print(f"{'='*65}")

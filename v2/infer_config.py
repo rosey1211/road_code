@@ -44,8 +44,8 @@ CHECKPOINT = _train_cfg.CHECKPOINT
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data/paintball", "paint_ball_r6_route_follow_backwards_lr", "test")
 
-DATASET_DIR = os.path.join(os.path.dirname(__file__),
-                           "..", "data/paintball", "paint_ball_r7_lr", "test")
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data/paintball", "paint_ball_r7_lr", "test")
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data/paintball", "r1_dense_vegetation_lr", "test")
 
@@ -57,6 +57,8 @@ DATASET_DIR = os.path.join(os.path.dirname(__file__),
 
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data", "trail_w_vehicle_in_front", "test")
+DATASET_DIR = os.path.join(os.path.dirname(__file__),
+                           "..", "data", "west_virginia_lr", "train")
 
 # Name of the labels CSV inside DATASET_DIR.
 LABELS_CSV_NAME = "labels.csv"
@@ -66,8 +68,8 @@ LABELS_CSV = os.path.join(DATASET_DIR, LABELS_CSV_NAME)
 
 # ── Display ───────────────────────────────────────────────────────────────────
 # Seconds between frames.  Set to 0 to wait for a keypress between each image.
-DELAY = 0.1
-#DELAY = 0.001
+#DELAY = 0.1
+DELAY = 0.001
 
 # DataLoader worker processes for image prefetching.
 # 0 = load in the main thread (safe but slow).
@@ -115,6 +117,10 @@ ROAD_MOMENTUM_DECAY = 0.6
 
 # Minimum momentum required to keep showing road using the previous frame's peaks.
 ROAD_MOMENTUM_THRESH = 0.25
+
+# Number of consecutive frames both the middle (r1) and far (r0) scan lines must
+# show a second peak before a fork branch is drawn.  0 = draw immediately.
+FORK_CONFIRM_FRAMES = 4
 
 # When a strong peak exists on the farthest row (r0) near a secondary peak
 # candidate on the middle row (r1), lower the acceptance threshold to this
