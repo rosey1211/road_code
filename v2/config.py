@@ -67,6 +67,7 @@ GAUSSIAN_SIGMA = 1.0
 BATCH_SIZE    = 16
 EPOCHS        = 200
 LR            = 0.002
+WEIGHT_DECAY  = 1e-4   # L2 regularisation — helps prevent overfitting
 VAL_SPLIT     = 0.15   # fraction of data used for validation
 VIS_INTERVAL  = 0      # write a mid-epoch snapshot every N batches (0 = off)
 # Stop training if val loss does not improve for this many consecutive epochs.

@@ -61,7 +61,7 @@ model = RoadCNN(
     row_bucket_margins   = getattr(config, "ROW_BUCKET_MARGINS",  [0.0, 0.0, 0.0]),
     bucket_nonlinearity  = getattr(config, "BUCKET_NONLINEARITY", 1.0),
 ).to(DEVICE)
-optimizer = optim.Adam(model.parameters(), lr=config.LR)
+optimizer = optim.Adam(model.parameters(), lr=config.LR, weight_decay=config.WEIGHT_DECAY)
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.EPOCHS)
 
 n_params = sum(p.numel() for p in model.parameters())
