@@ -15,9 +15,12 @@
 
 #include <opencv2/opencv.hpp>
 
+#include <limits>
+
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <geometry_msgs/msg/point32.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <cv_bridge/cv_bridge/cv_bridge.hpp>
 
 #include "road_centerline/msg/centerline_result.hpp"
@@ -66,21 +69,36 @@ static ModelConfig loadConfig(const std::string & path)
 struct Peak {
     double cx_frac;
     float  conf;
-    bool   is_primary = false;  // true for the highest-confidence cluster winner
+    bool   is_primary = false;  // true for the temporal-bias winner
 };
 
 // Returns all significant cluster peaks sorted left-to-right.
-// A secondary peak must reach fork_suppress_thresh × primary confidence to be included.
-static std::vector<Peak> findAllPeaks(const std::vector<float> & probs,
-                                       const std::vector<double>& edges,
-                                       float cluster_thresh_frac,
-                                       float fork_suppress_thresh = 0.9f)
+//
+// Temporal bias: clusters near prev_cx_frac get a confidence boost so the
+//   tracker stays with the same road lane when two clusters have similar conf.
+//   prev_cx_frac < 0 means no prior frame (bias disabled).
+//
+// Hint peaks: secondary peak threshold for this row is lowered from
+//   fork_suppress_thresh to fork_hint_thresh when a hint peak (from the
+//   farther row) lies within fork_hint_proximity of the candidate secondary.
+//   hint_peaks = nullptr disables hinting.
+static std::vector<Peak> findAllPeaks(
+    const std::vector<float>  & probs,
+    const std::vector<double> & edges,
+    float  cluster_thresh_frac,
+    float  fork_suppress_thresh    = 0.9f,
+    double prev_cx_frac            = -1.0,
+    float  temporal_bias_weight    = 0.1f,
+    float  temporal_proximity_range = 0.1f,
+    const std::vector<Peak> * hint_peaks = nullptr,
+    float  fork_hint_thresh        = 0.55f,
+    float  fork_hint_proximity     = 0.20f)
 {
     int   n         = static_cast<int>(probs.size());
     float peak_conf = *std::max_element(probs.begin(), probs.end());
     float thresh    = std::max(0.05f, peak_conf * cluster_thresh_frac);
 
-    struct Cluster { int lo, hi; float peak_conf; double cx_frac; };
+    struct Cluster { int lo, hi; float peak_conf; double cx_frac; float eff_conf; };
     std::vector<Cluster> clusters;
     int start = -1;
     for (int b = 0; b < n; ++b) {
@@ -93,7 +111,8 @@ static std::vector<Peak> findAllPeaks(const std::vector<float> & probs,
                 double cx = (edges[i] + edges[i+1]) * 0.5;
                 tw += probs[i]; wx += cx * probs[i];
             }
-            clusters.push_back({start, b-1, pc, tw > 0 ? wx/tw : (edges[start]+edges[b])*0.5});
+            clusters.push_back({start, b-1, pc,
+                tw > 0 ? wx/tw : (edges[start]+edges[b])*0.5, pc});
             start = -1;
         }
     }
@@ -104,7 +123,8 @@ static std::vector<Peak> findAllPeaks(const std::vector<float> & probs,
             double cx = (edges[i] + edges[i+1]) * 0.5;
             tw += probs[i]; wx += cx * probs[i];
         }
-        clusters.push_back({start, n-1, pc, tw > 0 ? wx/tw : (edges[start]+edges[n])*0.5});
+        clusters.push_back({start, n-1, pc,
+            tw > 0 ? wx/tw : (edges[start]+edges[n])*0.5, pc});
     }
 
     if (clusters.empty()) {
@@ -112,17 +132,41 @@ static std::vector<Peak> findAllPeaks(const std::vector<float> & probs,
         return {{(edges[pb]+edges[pb+1])*0.5, peak_conf, true}};
     }
 
-    // Sort by confidence descending to identify primary vs secondary
-    std::sort(clusters.begin(), clusters.end(),
-        [](const Cluster & a, const Cluster & b){ return a.peak_conf > b.peak_conf; });
+    // Apply temporal proximity bias to effective confidence
+    if (prev_cx_frac >= 0.0) {
+        for (auto & cl : clusters) {
+            double dist = std::abs(cl.cx_frac - prev_cx_frac);
+            float proximity = static_cast<float>(
+                std::max(0.0, 1.0 - dist / temporal_proximity_range));
+            cl.eff_conf = cl.peak_conf * (1.0f + temporal_bias_weight * proximity);
+        }
+    }
 
-    float primary_conf = clusters[0].peak_conf;
+    // Sort by effective confidence descending to find temporal-bias winner
+    std::sort(clusters.begin(), clusters.end(),
+        [](const Cluster & a, const Cluster & b){ return a.eff_conf > b.eff_conf; });
+
+    float primary_conf = clusters[0].peak_conf;   // raw conf for threshold math
     std::vector<Peak> result;
     result.push_back({clusters[0].cx_frac, clusters[0].peak_conf, true});   // primary
 
-    // Accept secondary only if it meets the fork suppression threshold
-    if (clusters.size() > 1 && clusters[1].peak_conf >= primary_conf * fork_suppress_thresh)
-        result.push_back({clusters[1].cx_frac, clusters[1].peak_conf, false}); // secondary
+    // Accept secondary if it meets the fork suppression threshold.
+    // Lower the threshold when a hint peak (from the far row) is nearby.
+    if (clusters.size() > 1) {
+        float sec_thresh = primary_conf * fork_suppress_thresh;
+        if (hint_peaks && !hint_peaks->empty()) {
+            double sec_cx = clusters[1].cx_frac;
+            for (const auto & hp : *hint_peaks) {
+                if (std::abs(hp.cx_frac - sec_cx) < fork_hint_proximity) {
+                    sec_thresh = std::min(sec_thresh,
+                                         primary_conf * fork_hint_thresh);
+                    break;
+                }
+            }
+        }
+        if (clusters[1].peak_conf >= sec_thresh)
+            result.push_back({clusters[1].cx_frac, clusters[1].peak_conf, false});
+    }
 
     // Sort left-to-right for fork drawing (primary may no longer be [0])
     std::sort(result.begin(), result.end(),
@@ -197,6 +241,212 @@ static void drawBranch(cv::Mat & canvas,
     cv::polylines(canvas, contours, false, _PRED, lw, cv::LINE_AA);
 }
 
+// ── Flat-world ground projection ──────────────────────────────────────────────
+
+struct FlatWorldExtrinsic {
+    double height_m   = 1.2;
+    double pitch_deg  = 0.0;
+    double roll_deg   = 0.0;
+    double x_offset_m = 0.0;
+    double y_offset_m = 0.0;
+};
+
+static FlatWorldExtrinsic loadExtrinsic(const std::string & path)
+{
+    YAML::Node y = YAML::LoadFile(path);
+    FlatWorldExtrinsic e;
+    e.height_m   = y["camera_height_m"].as<double>();
+    e.pitch_deg  = y["camera_pitch_deg"].as<double>();
+    e.roll_deg   = y["camera_roll_deg"].as<double>();
+    e.x_offset_m = y["camera_x_offset_m"].as<double>();
+    e.y_offset_m = y["camera_y_offset_m"].as<double>();
+    return e;
+}
+
+// Reads a camera K matrix from a yaml file.
+// Supports ROS camera_info format (camera_matrix.data) or simple K flat array.
+// Scales K to match the model's pixel resolution.
+static cv::Matx33d loadAndScaleK(const std::string & path, int model_w, int model_h)
+{
+    YAML::Node y = YAML::LoadFile(path);
+
+    std::vector<double> kv;
+    if (y["camera_matrix"] && y["camera_matrix"]["data"]) {
+        for (auto v : y["camera_matrix"]["data"]) kv.push_back(v.as<double>());
+    } else {
+        for (auto v : y["K"]) kv.push_back(v.as<double>());
+    }
+
+    cv::Matx33d K(kv[0], kv[1], kv[2],
+                  kv[3], kv[4], kv[5],
+                  kv[6], kv[7], kv[8]);
+
+    // Scale K from native image resolution to model resolution
+    int native_w = model_w, native_h = model_h;
+    if (y["image_width"])  native_w = y["image_width"].as<int>();
+    if (y["image_height"]) native_h = y["image_height"].as<int>();
+
+    double sx = static_cast<double>(model_w) / native_w;
+    double sy = static_cast<double>(model_h) / native_h;
+    K(0, 0) *= sx;  // fx
+    K(0, 2) *= sx;  // cx
+    K(1, 1) *= sy;  // fy
+    K(1, 2) *= sy;  // cy
+    return K;
+}
+
+// Rotation matrix: vehicle frame (X=fwd, Y=left, Z=up) → camera frame (X=right, Y=down, Z=fwd)
+// R = Rz(roll) @ Rx(pitch) @ R_base
+static cv::Matx33d buildRotation(double pitch_deg, double roll_deg)
+{
+    // Base: camera pointing straight ahead, perfectly level
+    cv::Matx33d R_base(0, -1,  0,
+                       0,  0, -1,
+                       1,  0,  0);
+
+    double pitch = pitch_deg * M_PI / 180.0;
+    double roll  = roll_deg  * M_PI / 180.0;
+    double cp = std::cos(pitch), sp = std::sin(pitch);
+    double cr = std::cos(roll),  sr = std::sin(roll);
+
+    cv::Matx33d Rx(1,  0,   0,
+                   0,  cp, -sp,
+                   0,  sp,  cp);
+
+    cv::Matx33d Rz(cr, -sr,  0,
+                   sr,  cr,  0,
+                   0,   0,   1);
+
+    return Rz * Rx * R_base;
+}
+
+// Unproject a model-space pixel to the flat ground plane (Z=0 in vehicle frame).
+// Returns false if the ray points away from the ground.
+static bool unprojectToGround(double u, double v,
+                               const cv::Matx33d & K,
+                               const cv::Matx33d & R,
+                               const FlatWorldExtrinsic & e,
+                               double & X_fwd, double & Y_left)
+{
+    // Ray direction in camera frame (un-normalised)
+    double fx = K(0, 0), fy = K(1, 1), cx = K(0, 2), cy = K(1, 2);
+    cv::Vec3d d_cam((u - cx) / fx, (v - cy) / fy, 1.0);
+
+    // Ray direction in vehicle frame
+    cv::Vec3d d_veh = R.t() * d_cam;
+
+    // Ground plane Z=0: height + t * d_veh[2] = 0
+    if (d_veh[2] >= 0.0) return false;   // ray pointing upward, won't hit ground
+    double t = -e.height_m / d_veh[2];
+
+    X_fwd  = e.x_offset_m + t * d_veh[0];
+    Y_left = e.y_offset_m + t * d_veh[1];
+    return true;
+}
+
+// Back-project a vehicle-frame ground point to model-space pixel coordinates.
+static cv::Point2d projectGroundToModel(double X_fwd, double Y_left,
+                                         const cv::Matx33d & K,
+                                         const cv::Matx33d & R,
+                                         const FlatWorldExtrinsic & e)
+{
+    cv::Vec3d p_rel(X_fwd - e.x_offset_m, Y_left - e.y_offset_m, -e.height_m);
+    cv::Vec3d p_cam = R * p_rel;
+    double u = K(0, 0) * p_cam[0] / p_cam[2] + K(0, 2);
+    double v = K(1, 1) * p_cam[1] / p_cam[2] + K(1, 2);
+    return {u, v};
+}
+
+// Sample the road centerline path in model-space pixel coordinates.
+// Produces a linear segment (p_near → p_mid) followed by a cubic Bézier
+// (p_mid → p_far) using the same tangent logic as drawBranch.
+// p_far may be nullptr — in that case only the linear segment is returned.
+static std::vector<cv::Point2d> samplePathModel(cv::Point2d p_near,
+                                                 cv::Point2d p_mid,
+                                                 const cv::Point2d * p_far,
+                                                 int n_lin = 20,
+                                                 int n_bez = 50)
+{
+    std::vector<cv::Point2d> pts;
+    pts.reserve(n_lin + n_bez);
+
+    // Linear segment: near → mid
+    for (int i = 0; i <= n_lin; ++i) {
+        double t = static_cast<double>(i) / n_lin;
+        pts.push_back(p_near + t * (p_mid - p_near));
+    }
+
+    if (!p_far) return pts;
+
+    // Cubic Bézier: mid → far (same tangent construction as drawBranch)
+    cv::Point2d seg      = p_mid - p_near;
+    double      seg_len  = cv::norm(seg);
+    cv::Point2d tdir_s   = seg_len > 0 ? seg / seg_len : cv::Point2d(0, -1);
+    cv::Point2d chord    = *p_far - p_mid;
+    double      clen     = cv::norm(chord);
+    cv::Point2d chord_hat = clen > 0 ? chord / clen : tdir_s;
+    double dot    = tdir_s.x * chord_hat.x + tdir_s.y * chord_hat.y;
+    cv::Point2d tdir_e = 2.0 * dot * chord_hat - tdir_s;
+    double alpha  = clen / 3.0;
+    cv::Point2d cp1 = p_mid + alpha * tdir_s;
+    cv::Point2d cp2 = *p_far - alpha * tdir_e;
+    cp1.y = std::max(cp1.y, p_far->y);
+    cp2.y = std::max(cp2.y, p_far->y);
+
+    for (int i = 1; i <= n_bez; ++i) {
+        double t = static_cast<double>(i) / n_bez;
+        double mt = 1.0 - t;
+        cv::Point2d p = mt*mt*mt * p_mid
+                      + 3*mt*mt*t * cp1
+                      + 3*mt*t*t  * cp2
+                      + t*t*t     * (*p_far);
+        pts.push_back(p);
+    }
+    return pts;
+}
+
+// Walk the sampled path on the ground plane, find the first point at or beyond
+// lookahead_m from the vehicle origin, and return the pure-pursuit curvature.
+// Also fills lookahead_img_pt (model pixels) for the visual overlay.
+// Returns NaN when the path cannot be unprojected or is too short.
+static float computeSteeringCurvature(const std::vector<cv::Point2d> & path_model,
+                                       const cv::Matx33d & K,
+                                       const cv::Matx33d & R,
+                                       const FlatWorldExtrinsic & e,
+                                       double lookahead_m,
+                                       cv::Point2d & lookahead_img_pt)
+{
+    const float NaN = std::numeric_limits<float>::quiet_NaN();
+
+    // Unproject every sample to vehicle ground frame; keep valid ones
+    struct GroundPt { double X, Y; cv::Point2d img; };
+    std::vector<GroundPt> gpts;
+    gpts.reserve(path_model.size());
+    for (const auto & p : path_model) {
+        double X, Y;
+        if (unprojectToGround(p.x, p.y, K, R, e, X, Y))
+            gpts.push_back({X, Y, p});
+    }
+    if (gpts.empty()) return NaN;
+
+    // Find first point at or beyond lookahead_m from vehicle origin (0,0)
+    for (const auto & g : gpts) {
+        double dist = std::hypot(g.X, g.Y);
+        if (dist >= lookahead_m) {
+            lookahead_img_pt = g.img;
+            // κ = 2·Y_L / L²   (pure pursuit, Y_L = lateral, L = straight-line dist)
+            return static_cast<float>(2.0 * g.Y / (dist * dist));
+        }
+    }
+
+    // Lookahead extends beyond the visible path: use farthest point
+    const auto & last = gpts.back();
+    double dist = std::hypot(last.X, last.Y);
+    if (dist < 1e-3) return NaN;
+    lookahead_img_pt = last.img;
+    return static_cast<float>(2.0 * last.Y / (dist * dist));
+}
+
 // ── ROS2 node ──────────────────────────────────────────────────────────────────
 class RoadCenterlineNode : public rclcpp::Node
 {
@@ -216,6 +466,17 @@ public:
         declare_parameter("min_display_height",   480);
         declare_parameter("far_row_curve_thresh", 0.0);
         declare_parameter("fork_confirm_frames",  4);
+        declare_parameter("flat_world_yaml",           std::string(""));
+        declare_parameter("intrinsics_yaml",           std::string(""));
+        declare_parameter("lookahead_distance_m",      3.0);
+        declare_parameter("forward_speed_mps",         0.0);
+        declare_parameter("vehicle_wheelbase_m",       0.3);
+        declare_parameter("temporal_bias_weight",      0.1);
+        declare_parameter("temporal_proximity_range",  0.1);
+        declare_parameter("fork_hint_thresh",          0.55);
+        declare_parameter("fork_hint_proximity",       0.20);
+        declare_parameter("road_momentum_decay",       0.6);
+        declare_parameter("road_momentum_thresh",      0.25);
 
         road_threshold_      = get_parameter("road_threshold").as_double();
         min_peak_conf_       = get_parameter("min_peak_conf").as_double();
@@ -224,6 +485,38 @@ public:
         min_display_height_  = get_parameter("min_display_height").as_int();
         far_row_curve_thresh_= get_parameter("far_row_curve_thresh").as_double();
         fork_confirm_frames_ = get_parameter("fork_confirm_frames").as_int();
+        lookahead_distance_m_      = get_parameter("lookahead_distance_m").as_double();
+        forward_speed_mps_         = get_parameter("forward_speed_mps").as_double();
+        vehicle_wheelbase_m_       = get_parameter("vehicle_wheelbase_m").as_double();
+        temporal_bias_weight_      = static_cast<float>(get_parameter("temporal_bias_weight").as_double());
+        temporal_proximity_range_  = static_cast<float>(get_parameter("temporal_proximity_range").as_double());
+        fork_hint_thresh_          = static_cast<float>(get_parameter("fork_hint_thresh").as_double());
+        fork_hint_proximity_       = static_cast<float>(get_parameter("fork_hint_proximity").as_double());
+        road_momentum_decay_       = static_cast<float>(get_parameter("road_momentum_decay").as_double());
+        road_momentum_thresh_      = static_cast<float>(get_parameter("road_momentum_thresh").as_double());
+
+        // Flat-world steering (optional)
+        {
+            auto fw   = get_parameter("flat_world_yaml").as_string();
+            auto intr = get_parameter("intrinsics_yaml").as_string();
+            if (!fw.empty() && !intr.empty() &&
+                std::filesystem::exists(fw) && std::filesystem::exists(intr))
+            {
+                // Config not loaded yet; parse image dims first
+                YAML::Node mc = YAML::LoadFile(get_parameter("config_path").as_string());
+                int mw = mc["image_width"].as<int>(), mh = mc["image_height"].as<int>();
+                extr_    = loadExtrinsic(fw);
+                K_model_ = loadAndScaleK(intr, mw, mh);
+                R_cam_   = buildRotation(extr_.pitch_deg, extr_.roll_deg);
+                flat_world_loaded_ = true;
+                RCLCPP_INFO(get_logger(),
+                    "Flat-world steering enabled  h=%.2f m  pitch=%.2f°  roll=%.2f°  lookahead=%.1f m",
+                    extr_.height_m, extr_.pitch_deg, extr_.roll_deg, lookahead_distance_m_);
+            } else {
+                RCLCPP_WARN(get_logger(),
+                    "Flat-world yaml not configured — steering_curvature will be NaN");
+            }
+        }
 
         cfg_ = loadConfig(get_parameter("config_path").as_string());
         RCLCPP_INFO(get_logger(), "Model config: %dx%d  buckets=%d  rows=%d",
@@ -242,8 +535,9 @@ public:
         image_sub_ = create_subscription<sensor_msgs::msg::Image>(
             image_topic, 10,
             std::bind(&RoadCenterlineNode::imageCallback, this, std::placeholders::_1));
-        result_pub_ = create_publisher<road_centerline::msg::CenterlineResult>(output_topic, 10);
-        visual_pub_ = create_publisher<sensor_msgs::msg::Image>(visual_topic, 10);
+        result_pub_   = create_publisher<road_centerline::msg::CenterlineResult>(output_topic, 10);
+        visual_pub_   = create_publisher<sensor_msgs::msg::Image>(visual_topic, 10);
+        steering_pub_ = create_publisher<geometry_msgs::msg::Twist>("steering_cmd", 10);
 
         RCLCPP_INFO(get_logger(), "Listening on '%s'", image_topic.c_str());
         RCLCPP_INFO(get_logger(), "Publishing results on '%s'", output_topic.c_str());
@@ -294,20 +588,50 @@ private:
         float road_prob   = torch::softmax(cls_logits, 0)[1].item<float>();
         bool  road_present = road_prob > road_threshold_;
 
-        // Per-row peak detection (all cluster peaks for fork awareness)
+        // Per-row peak detection with temporal bias and hint peaks.
+        // Process r0 (far) first so its peaks can hint r1 (mid) secondary threshold.
         std::vector<std::vector<Peak>> all_peaks(3);
         std::vector<std::vector<float>> row_probs(3);
-        float conf_sum = 0.0f;
         for (int r = 0; r < 3; ++r) {
             auto sig = torch::sigmoid(row_logits[r]);
             row_probs[r].assign(sig.data_ptr<float>(),
                                  sig.data_ptr<float>() + cfg_.n_buckets);
-            all_peaks[r] = findAllPeaks(row_probs[r], cfg_.bucket_edges[r],
-                                         static_cast<float>(cluster_thresh_));
-            conf_sum += primaryOf(all_peaks[r]).conf;
         }
+        // r0 (far): no hints
+        all_peaks[0] = findAllPeaks(row_probs[0], cfg_.bucket_edges[0],
+            static_cast<float>(cluster_thresh_), 0.9f,
+            prev_cx_frac_[0], temporal_bias_weight_, temporal_proximity_range_);
+        // r1 (mid): r0 peaks as hints
+        all_peaks[1] = findAllPeaks(row_probs[1], cfg_.bucket_edges[1],
+            static_cast<float>(cluster_thresh_), 0.9f,
+            prev_cx_frac_[1], temporal_bias_weight_, temporal_proximity_range_,
+            &all_peaks[0], fork_hint_thresh_, fork_hint_proximity_);
+        // r2 (near): no hints
+        all_peaks[2] = findAllPeaks(row_probs[2], cfg_.bucket_edges[2],
+            static_cast<float>(cluster_thresh_), 0.9f,
+            prev_cx_frac_[2], temporal_bias_weight_, temporal_proximity_range_);
+
+        float conf_sum = 0.0f;
+        for (int r = 0; r < 3; ++r)
+            conf_sum += primaryOf(all_peaks[r]).conf;
         float mean_conf = conf_sum / 3.0f;
         if (mean_conf < min_peak_conf_) road_present = false;
+
+        // Road momentum: decay when road drops; restore from last valid peaks if
+        // momentum is still above threshold (roads don't just disappear).
+        if (road_present) {
+            road_momentum_ = 1.0f;
+            prev_peaks_    = all_peaks;
+            for (int r = 0; r < 3; ++r)
+                prev_cx_frac_[r] = primaryOf(all_peaks[r]).cx_frac;
+        } else {
+            road_momentum_ *= road_momentum_decay_;
+            fork_frame_count_ = 0;   // reset fork tracking whenever raw signal drops
+            if (road_momentum_ >= road_momentum_thresh_ && !prev_peaks_.empty()) {
+                all_peaks    = prev_peaks_;
+                road_present = true;
+            }
+        }
 
         // Fork confirmation: both r1 (mid) and r0 (far) must show 2+ peaks for
         // fork_confirm_frames_ consecutive road-present frames before drawing a fork.
@@ -318,6 +642,36 @@ private:
             fork_frame_count_ = 0;
         }
         bool draw_fork = road_present && (fork_frame_count_ >= fork_confirm_frames_);
+
+        // ── Flat-world steering ───────────────────────────────────────────────
+        float steering_curvature = std::numeric_limits<float>::quiet_NaN();
+        cv::Point2d lookahead_img_pt(-1, -1);
+        if (road_present && flat_world_loaded_) {
+            const Peak & r2 = primaryOf(all_peaks[2]);
+            const Peak & r1 = primaryOf(all_peaks[1]);
+            const Peak & r0 = primaryOf(all_peaks[0]);
+
+            cv::Point2d p_near(r2.cx_frac * cfg_.image_width,
+                               cfg_.row_fractions[2] * cfg_.image_height);
+            cv::Point2d p_mid (r1.cx_frac * cfg_.image_width,
+                               cfg_.row_fractions[1] * cfg_.image_height);
+            cv::Point2d p_far_val(r0.cx_frac * cfg_.image_width,
+                                  cfg_.row_fractions[0] * cfg_.image_height);
+            const cv::Point2d * p_far_ptr =
+                (r0.conf >= far_row_curve_thresh_) ? &p_far_val : nullptr;
+
+            auto path = samplePathModel(p_near, p_mid, p_far_ptr);
+            steering_curvature = computeSteeringCurvature(
+                path, K_model_, R_cam_, extr_, lookahead_distance_m_, lookahead_img_pt);
+        }
+
+        // Publish Twist steering command
+        if (!std::isnan(steering_curvature)) {
+            geometry_msgs::msg::Twist twist;
+            twist.linear.x  = forward_speed_mps_;
+            twist.angular.z = forward_speed_mps_ * static_cast<double>(steering_curvature);
+            steering_pub_->publish(twist);
+        }
 
         // ── Publish CenterlineResult ──────────────────────────────────────────
         road_centerline::msg::CenterlineResult result;
@@ -336,6 +690,7 @@ private:
                 result.points.push_back(pt);
             }
         }
+        result.steering_curvature = steering_curvature;
         result_pub_->publish(result);
 
         // ── Build and publish visual ──────────────────────────────────────────
@@ -345,7 +700,8 @@ private:
                                    std::vector<float>{primaryOf(all_peaks[0]).conf,
                                                        primaryOf(all_peaks[1]).conf,
                                                        primaryOf(all_peaks[2]).conf},
-                                   draw_fork);
+                                   draw_fork,
+                                   steering_curvature, lookahead_img_pt);
             std_msgs::msg::Header hdr = msg->header;
             auto vis_msg = cv_bridge::CvImage(hdr, "bgr8", vis).toImageMsg();
             visual_pub_->publish(*vis_msg);
@@ -361,7 +717,9 @@ private:
                         float  road_prob,
                         float  mean_conf,
                         const std::vector<float>             & row_confs,
-                        bool   draw_fork)
+                        bool   draw_fork,
+                        float  steering_curvature  = std::numeric_limits<float>::quiet_NaN(),
+                        cv::Point2d lookahead_model = {-1, -1})
     {
         // Upscale small images to min_display_height
         cv::Mat canvas = src_bgr.clone();
@@ -516,6 +874,18 @@ private:
             }
         }
 
+        // Lookahead drive-to point (cyan circle)
+        if (flat_world_loaded_ && road_present && lookahead_model.x >= 0) {
+            double scale_x = static_cast<double>(w) / cfg_.image_width;
+            double scale_y = static_cast<double>(h) / cfg_.image_height;
+            cv::Point lpt(static_cast<int>(lookahead_model.x * scale_x),
+                          static_cast<int>(lookahead_model.y * scale_y));
+            if (lpt.x >= 0 && lpt.x < w && lpt.y >= 0 && lpt.y < h) {
+                cv::circle(canvas, lpt, cr + 2, cv::Scalar(230, 200, 0),   2, cv::LINE_AA);  // cyan ring
+                cv::circle(canvas, lpt, dot_r,  cv::Scalar(255, 255, 255), cv::FILLED, cv::LINE_AA);
+            }
+        }
+
         // No-road red border
         if (!road_present) {
             canvas.rowRange(0, border)     = _RED;
@@ -528,14 +898,26 @@ private:
         cv::Scalar bar_col = road_present ? cv::Scalar(30,140,30) : cv::Scalar(40,40,160);
         cv::Mat label_bar(lbl_h, w, CV_8UC3, bar_col);
         std::string label;
-        if (road_present)
+        if (road_present) {
             label = "ROAD " + std::to_string(static_cast<int>(road_prob*100)) + "%"
                   + "  conf:" + std::to_string(static_cast<int>(mean_conf*100)) + "%"
                   + "  [" + std::to_string(static_cast<int>(row_confs[0]*100))
                   + "/" + std::to_string(static_cast<int>(row_confs[1]*100))
                   + "/" + std::to_string(static_cast<int>(row_confs[2]*100)) + "%]";
-        else
+            if (!std::isnan(steering_curvature)) {
+                char buf[48];
+                double kappa = static_cast<double>(steering_curvature);
+                double alpha = std::atan(vehicle_wheelbase_m_ * kappa) * 180.0 / M_PI;
+                if (std::abs(kappa) < 1e-3)
+                    std::snprintf(buf, sizeof(buf), "  str: straight");
+                else
+                    std::snprintf(buf, sizeof(buf), "  str: R=%.1fm  α=%.1f°",
+                                  1.0 / kappa, alpha);
+                label += buf;
+            }
+        } else {
             label = "NO ROAD " + std::to_string(static_cast<int>((1-road_prob)*100)) + "%";
+        }
 
         cv::putText(label_bar, label, {std::max(2,static_cast<int>(4*s)), lbl_y},
                     cv::FONT_HERSHEY_PLAIN, fs_l, cv::Scalar(255,255,255),
@@ -560,9 +942,32 @@ private:
     int    fork_confirm_frames_;
     int    fork_frame_count_ = 0;
 
+    // Temporal tracking
+    std::array<double, 3>      prev_cx_frac_ = {-1.0, -1.0, -1.0};
+    std::vector<std::vector<Peak>> prev_peaks_;
+    float  road_momentum_ = 0.0f;
+
+    // Peak detection parameters
+    float temporal_bias_weight_     = 0.1f;
+    float temporal_proximity_range_ = 0.1f;
+    float fork_hint_thresh_         = 0.55f;
+    float fork_hint_proximity_      = 0.20f;
+    float road_momentum_decay_      = 0.6f;
+    float road_momentum_thresh_     = 0.25f;
+
+    // Flat-world steering
+    bool             flat_world_loaded_ = false;
+    FlatWorldExtrinsic extr_;
+    cv::Matx33d      K_model_;
+    cv::Matx33d      R_cam_;
+    double           lookahead_distance_m_ = 3.0;
+    double           forward_speed_mps_    = 0.0;
+    double           vehicle_wheelbase_m_  = 0.3;
+
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
     rclcpp::Publisher<road_centerline::msg::CenterlineResult>::SharedPtr result_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr visual_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr steering_pub_;
 };
 
 static const std::string DEFAULT_PARAMS_FILE =

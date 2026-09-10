@@ -1,0 +1,14 @@
+source;share/road_centerline/hook/cmake_prefix_path.ps1
+source;share/road_centerline/hook/cmake_prefix_path.dsv
+source;share/road_centerline/hook/cmake_prefix_path.sh
+source;share/road_centerline/hook/ld_library_path_lib.ps1
+source;share/road_centerline/hook/ld_library_path_lib.dsv
+source;share/road_centerline/hook/ld_library_path_lib.sh
+source;share/road_centerline/hook/pythonpath.ps1
+source;share/road_centerline/hook/pythonpath.dsv
+source;share/road_centerline/hook/pythonpath.sh
+source;share/road_centerline/local_setup.bash
+source;share/road_centerline/local_setup.dsv
+source;share/road_centerline/local_setup.ps1
+source;share/road_centerline/local_setup.sh
+source;share/road_centerline/local_setup.zsh

@@ -20,3 +20,8 @@ float32[3] row_confidences
 # point.y  — normalised row     [0,1]  (0 = top,       1 = bottom)
 # point.z  — peak confidence for this row
 geometry_msgs/Point32[] points
+
+# Desired steering curvature (m⁻¹) from flat-world pure-pursuit.
+# Positive = turn left (positive lateral offset), negative = turn right.
+# NaN when flat-world calibration is not loaded or road is not present.
+float32 steering_curvature

@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dot -V)"
+      "Bash(dot -V)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('camera_lidar_labeling_tool.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")"
     ]
   }
 }
