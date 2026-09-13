@@ -580,9 +580,14 @@ def main():
     state        = {'prev_cx': [None, None, None], 'prev_peaks': None, 'road_momentum': 0.0, 'fork_frames': 0}
     _rate_count  = 0
     _rate_start  = time.time()
+    _nnpack_done = False
+    _t_load = _t_infer = _t_build = _t_show = 0.0
+
     with torch.no_grad():
         while 0 <= idx < total:
             if not paused:
+                _t0 = time.perf_counter()
+
                 if has_gt:
                     image, road_present, gt_masks = ds[idx]
                     gt_t = gt_masks.cpu()
@@ -593,24 +598,42 @@ def main():
                     image    = _to_tensor(pil_img)
                     gt_t     = None
 
+                _t1 = time.perf_counter()
                 image = image.unsqueeze(0).to(device)
-                with _suppress:
+                if not _nnpack_done:
+                    with _suppress:
+                        outputs = model(image)
+                    _nnpack_done = True
+                else:
                     outputs = model(image)
 
+                _t2 = time.perf_counter()
                 img_t = image.squeeze(0).cpu()
                 outs  = tuple(o.cpu() for o in outputs)
 
                 frame, road_prob, pred_road, overall_conf, row_confs = \
                     _build_frame(img_t, outs, gt_t, model, state)
 
+                _t3 = time.perf_counter()
+                cv2.imshow(WINDOW, frame[:, :, ::-1])   # RGB → BGR for cv2
+                _t4 = time.perf_counter()
+
+                _t_load  += _t1 - _t0
+                _t_infer += _t2 - _t1
+                _t_build += _t3 - _t2
+                _t_show  += _t4 - _t3
 
                 _rate_count += 1
                 if _rate_count % 20 == 0:
                     _elapsed = time.time() - _rate_start
-                    print(f"  --- avg cycle rate: {20 / _elapsed:.1f} fps ---")
+                    fps = 20 / _elapsed
+                    print(f"  --- {fps:.1f} fps  |  "
+                          f"load {_t_load*50:.1f}ms  "
+                          f"infer {_t_infer*50:.1f}ms  "
+                          f"build {_t_build*50:.1f}ms  "
+                          f"show {_t_show*50:.1f}ms  (avg/frame)")
                     _rate_start = time.time()
-
-                cv2.imshow(WINDOW, frame[:, :, ::-1])   # RGB → BGR for cv2
+                    _t_load = _t_infer = _t_build = _t_show = 0.0
 
             key = cv2.waitKey(1 if paused else wait_ms) & 0xFF
             if key == ord("q"):

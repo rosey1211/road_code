@@ -1,5 +1,6 @@
 # ─── road_code/train.py ───────────────────────────────────────────────────────
 import sys
+import os
 import time
 import torch
 import torch.optim as optim
@@ -74,7 +75,9 @@ print(f"{'='*65}\n")
 
 # ─── Pre-training data sample panel ───────────────────────────────────────────
 import matplotlib.pyplot as plt
-_sample_path = os.path.join(os.path.dirname(config.CHECKPOINT), "pretrain_samples.png")
+_graphics_dir = os.path.join(os.path.dirname(__file__), "graphics")
+os.makedirs(_graphics_dir, exist_ok=True)
+_sample_path = os.path.join(_graphics_dir, "pretrain_samples.png")
 show_dataset_samples(n=5, save_path=_sample_path)
 plt.close("all")
 
@@ -96,7 +99,7 @@ def write_vis_snapshot(epoch, batch_idx, label=""):
         vis_images, vis_masks = _random_val_batch(n=8)
         vis_images = vis_images.to(DEVICE)          # ← must be on same device as model
         vis_outputs = model(vis_images)
-    save_path = os.path.join(os.path.dirname(config.CHECKPOINT),
+    save_path = os.path.join(_graphics_dir,
                              f"vis_epoch_{epoch:03d}_b{batch_idx:04d}.png")
     show_training_batch(
         vis_images.cpu(), tuple(o.cpu() for o in vis_outputs),
@@ -110,6 +113,22 @@ def write_vis_snapshot(epoch, batch_idx, label=""):
     model.train()
     return save_path
 
+
+# Suppress the one-time C++-level NNPACK warning that bypasses Python's warnings.
+# Redirect fd 2 to /dev/null only for the very first forward pass.
+_nnpack_warned = False
+_devnull_fd    = os.open(os.devnull, os.O_WRONLY)
+
+def _suppress_next_stderr():
+    """Context manager: mutes stderr at the fd level for one block."""
+    class _Ctx:
+        def __enter__(self):
+            self._saved = os.dup(2)
+            os.dup2(_devnull_fd, 2)
+        def __exit__(self, *_):
+            os.dup2(self._saved, 2)
+            os.close(self._saved)
+    return _Ctx()
 
 # ─── Train / eval loops ───────────────────────────────────────────────────────
 def run_epoch(loader, train=True, epoch=0):
@@ -126,7 +145,13 @@ def run_epoch(loader, train=True, epoch=0):
             road_present = road_present.to(DEVICE)
             bucket_masks = bucket_masks.to(DEVICE)
 
-            outputs = model(images)
+            global _nnpack_warned
+            if not _nnpack_warned:
+                with _suppress_next_stderr():
+                    outputs = model(images)
+                _nnpack_warned = True
+            else:
+                outputs = model(images)
 
             loss, cls_l, row_l = road_loss(outputs, road_present, bucket_masks,
                                            config.LAMBDA_CLS, config.LAMBDA_ROW,
@@ -168,7 +193,7 @@ best_val_loss    = float("inf")
 best_epoch       = None
 no_improve_count = 0
 total_start      = time.time()
-metrics_path  = os.path.join(os.path.dirname(config.CHECKPOINT), "metrics.png")
+metrics_path  = os.path.join(_graphics_dir, "metrics.png")
 history = {k: [] for k in
            ["tr_loss", "va_loss", "tr_cls", "va_cls",
             "tr_row",  "va_row",  "tr_acc", "va_acc"]}
@@ -247,8 +272,7 @@ for epoch in range(1, config.EPOCHS + 1):
         vis_images, vis_masks = _random_val_batch(n=8)
         vis_images = vis_images.to(DEVICE)          # ← must be on same device as model
         vis_outputs = model(vis_images)
-    save_path = os.path.join(os.path.dirname(config.CHECKPOINT),
-                             f"vis_epoch_{epoch:03d}.png")
+    save_path = os.path.join(_graphics_dir, f"vis_epoch_{epoch:03d}.png")
     show_training_batch(
         vis_images.cpu(), tuple(o.cpu() for o in vis_outputs),
         model, gt_masks=vis_masks,

@@ -57,8 +57,10 @@ CHECKPOINT = _train_cfg.CHECKPOINT
 
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data", "trail_w_vehicle_in_front", "test")
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data", "west_virginia_lr", "train")
 DATASET_DIR = os.path.join(os.path.dirname(__file__),
-                           "..", "data", "west_virginia_lr", "train")
+                           "..", "data/ruby_hill_data", "ruby_hill_1_lr", "train")
 
 # Name of the labels CSV inside DATASET_DIR.
 LABELS_CSV_NAME = "labels.csv"
@@ -80,12 +82,13 @@ NUM_WORKERS = 4
 # Minimum road-present classifier probability to treat a frame as "road".
 # Predictions (circles + connecting lines) are only drawn when this threshold
 # is exceeded.
-ROAD_THRESHOLD = 0.2
+ROAD_THRESHOLD = 0.3
+#ROAD_THRESHOLD = 0.2
 
 # Minimum mean peak confidence across all three rows to accept a road prediction.
 # If the combined confidence falls below this, the frame is treated as No Road
 # regardless of what the classifier says.
-MIN_PEAK_CONF = 0.1
+MIN_PEAK_CONF = 0.2
 
 # Minimum sigmoid confidence a *secondary* peak must reach (outside the primary
 # plateau) to suppress the road prediction as ambiguous/forked.
@@ -113,10 +116,14 @@ TEMPORAL_PROXIMITY_RANGE = 0.1
 
 # Per-frame decay applied to road confidence when the current frame says no-road.
 # 0.0 = instant dropout.  0.6 = fades over ~3 frames.  0.85 = very sticky.
-ROAD_MOMENTUM_DECAY = 0.6
+ROAD_MOMENTUM_DECAY = 0.0
+#ROAD_MOMENTUM_DECAY = 0.6
+
 
 # Minimum momentum required to keep showing road using the previous frame's peaks.
-ROAD_MOMENTUM_THRESH = 0.25
+ROAD_MOMENTUM_THRESH = 0.35
+#ROAD_MOMENTUM_THRESH = 0.25
+
 
 # Number of consecutive frames both the middle (r1) and far (r0) scan lines must
 # show a second peak before a fork branch is drawn.  0 = draw immediately.
