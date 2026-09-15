@@ -57,10 +57,10 @@ CHECKPOINT = _train_cfg.CHECKPOINT
 
 #DATASET_DIR = os.path.join(os.path.dirname(__file__),
 #                           "..", "data", "trail_w_vehicle_in_front", "test")
-#DATASET_DIR = os.path.join(os.path.dirname(__file__),
-#                           "..", "data", "west_virginia_lr", "train")
 DATASET_DIR = os.path.join(os.path.dirname(__file__),
-                           "..", "data/ruby_hill_data", "ruby_hill_1_lr", "train")
+                           "..", "data", "west_virginia_lr", "train")
+#DATASET_DIR = os.path.join(os.path.dirname(__file__),
+#                           "..", "data/ruby_hill_data", "ruby_hill_1_lr", "train")
 
 # Name of the labels CSV inside DATASET_DIR.
 LABELS_CSV_NAME = "labels.csv"
