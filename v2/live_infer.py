@@ -26,6 +26,7 @@ import time
 import cv2
 import numpy as np
 import torch
+torch.set_flush_denormal(True)   # subnormal weights → 0; prevents 100x slowdown on CPU
 
 sys.path.insert(0, os.path.dirname(__file__))
 import infer_config as cfg
